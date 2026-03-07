@@ -1,0 +1,40 @@
+{
+  "": {
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/master.swiftdeps"
+  },
+  "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/AppTheme.swift": {
+    "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/AppTheme.d",
+    "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/AppTheme.swift.o",
+    "swiftmodule": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/AppTheme~partial.swiftmodule",
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/AppTheme.swiftdeps",
+    "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/AppTheme.dia"
+  },
+  "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/ContentView.swift": {
+    "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/ContentView.d",
+    "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/ContentView.swift.o",
+    "swiftmodule": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/ContentView~partial.swiftmodule",
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/ContentView.swiftdeps",
+    "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/ContentView.dia"
+  },
+  "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/EmailStore.swift": {
+    "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/EmailStore.d",
+    "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/EmailStore.swift.o",
+    "swiftmodule": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/EmailStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/EmailStore.swiftdeps",
+    "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/EmailStore.dia"
+  },
+  "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/MsgVaultUIApp.swift": {
+    "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.d",
+    "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.swift.o",
+    "swiftmodule": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.swiftdeps",
+    "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.dia"
+  },
+  "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SpeechInputManager.swift": {
+    "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.d",
+    "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.swift.o",
+    "swiftmodule": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.swiftdeps",
+    "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.dia"
+  }
+}
