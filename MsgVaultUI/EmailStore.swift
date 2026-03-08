@@ -5,6 +5,7 @@ import SwiftUI
 
 struct EmailMessage: Identifiable, Hashable {
     let id: String
+    let gmailMessageID: String?
     let from: String
     let to: String
     let cc: String
@@ -33,6 +34,20 @@ struct EmailMessage: Identifiable, Hashable {
         }
         
         guard let id else { return nil }
+        let sourceMessageID = normalizedString(json["source_message_id"])
+        let gmailMessageID = sourceMessageID
+            ?? normalizedString(json["gmail_id"])
+            ?? normalizedString(json["gmailId"])
+            ?? {
+                if let messageId = normalizedString(json["message_id"]),
+                   looksLikeGmailMessageID(messageId) {
+                    return messageId
+                }
+                if looksLikeGmailMessageID(id) {
+                    return id
+                }
+                return nil
+            }()
         
         let fromEmail = json["from_email"] as? String ?? json["from"] as? String ?? json["sender"] as? String ?? "Unknown"
         let fromName = json["from_name"] as? String ?? ""
@@ -71,6 +86,7 @@ struct EmailMessage: Identifiable, Hashable {
 
         return EmailMessage(
             id: id,
+            gmailMessageID: gmailMessageID,
             from: displayFrom,
             to: toValue,
             cc: ccValue,
@@ -83,6 +99,26 @@ struct EmailMessage: Identifiable, Hashable {
             threadID: threadID,
             sizeEstimate: sizeEstimate
         )
+    }
+
+    static func looksLikeGmailMessageID(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard !trimmed.hasPrefix("text-") else { return false }
+        guard Int(trimmed) == nil else { return false }
+        let allowed = CharacterSet.alphanumerics
+        return trimmed.rangeOfCharacter(from: allowed.inverted) == nil
+    }
+
+    private static func normalizedString(_ raw: Any?) -> String? {
+        if let value = raw as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let value = raw as? Int {
+            return String(value)
+        }
+        return nil
     }
 }
 
@@ -1275,7 +1311,9 @@ class EmailStore: ObservableObject {
         defer { isLoadingAllSenders = false }
 
         do {
-            let output = try await runMsgvaultAsync(arguments: ["list-senders", "--json"])
+            // msgvault list-senders defaults to -n 50; use a high limit to get all senders
+            // across all boxes (including low-volume personal contacts), not just top senders.
+            let output = try await runMsgvaultAsync(arguments: ["list-senders", "--json", "-n", "100000"])
             allSenders = parseSenders(output)
         } catch {
             errorMessage = "Failed to load full sender list: \(error.localizedDescription)"
@@ -1427,6 +1465,9 @@ class EmailStore: ObservableObject {
             if let detail = parseMessageDetail(output) {
                 messageDetail = detail.bodyText
                 messageDetailHTML = detail.bodyHTML
+                if let current = selectedMessage, current.id == id {
+                    selectedMessage = mergedMessage(current, with: detail)
+                }
             } else {
                 // Fallback for older/atypical output formats.
                 messageDetail = output
@@ -1445,19 +1486,23 @@ class EmailStore: ObservableObject {
         }
     }
     
-    func fetchMessageDetail(id: String) async -> (bodyText: String, bodyHTML: String?) {
+    func fetchMessageDetail(for message: EmailMessage) async -> (
+        message: EmailMessage,
+        bodyText: String,
+        bodyHTML: String?
+    ) {
         do {
-            let output = try await runMsgvaultAsync(arguments: ["show-message", id, "--json"])
+            let output = try await runMsgvaultAsync(arguments: ["show-message", message.id, "--json"])
             if let detail = parseMessageDetail(output) {
-                return (detail.bodyText, detail.bodyHTML)
+                return (mergedMessage(message, with: detail), detail.bodyText, detail.bodyHTML)
             }
-            return (output, nil)
+            return (message, output, nil)
         } catch {
             do {
-                let legacyOutput = try await runMsgvaultAsync(arguments: ["show-message", id])
-                return (legacyOutput, nil)
+                let legacyOutput = try await runMsgvaultAsync(arguments: ["show-message", message.id])
+                return (message, legacyOutput, nil)
             } catch {
-                return ("Failed to load message: \(error.localizedDescription)", nil)
+                return (message, "Failed to load message: \(error.localizedDescription)", nil)
             }
         }
     }
@@ -1518,6 +1563,7 @@ class EmailStore: ObservableObject {
             currentId += 1
             messages.append(EmailMessage(
                 id: "text-\(currentId)",
+                gmailMessageID: nil,
                 from: extractField(from: trimmed, field: "From:") ?? "",
                 to: extractField(from: trimmed, field: "To:") ?? "",
                 cc: extractField(from: trimmed, field: "CC:") ?? "",
@@ -1663,6 +1709,17 @@ class EmailStore: ObservableObject {
     private struct MessageDetailPayload {
         let bodyText: String
         let bodyHTML: String?
+        let gmailMessageID: String?
+        let from: String
+        let to: String
+        let cc: String
+        let bcc: String
+        let subject: String
+        let date: String
+        let labels: [String]
+        let hasAttachment: Bool
+        let threadID: String?
+        let sizeEstimate: Int
     }
     
     private func parseMessageDetail(_ output: String) -> MessageDetailPayload? {
@@ -1671,12 +1728,64 @@ class EmailStore: ObservableObject {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
+        let normalize: (Any?) -> String? = { raw in
+            if let value = raw as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            if let value = raw as? Int {
+                return String(value)
+            }
+            return nil
+        }
         
         let bodyText = (json["body_text"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let rawHTML = (json["body_html"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         
+        let fromValue = parseAddressList(json["from"] ?? json["from_email"] ?? json["sender"])
+        let toValue = parseAddressList(json["to"] ?? json["to_emails"] ?? json["recipients"])
+        let ccValue = parseAddressList(json["cc"] ?? json["cc_emails"])
+        let bccValue = parseAddressList(json["bcc"] ?? json["bcc_emails"])
+        let subjectValue = (json["subject"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let dateValue = (json["sent_at"] as? String
+            ?? json["date"] as? String
+            ?? json["internal_date"] as? String
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let labelsValue = json["labels"] as? [String] ?? []
+        let gmailMessageIDValue: String? =
+            normalize(json["source_message_id"])
+            ?? normalize(json["gmail_id"])
+            ?? normalize(json["gmailId"])
+            ?? {
+                if let messageID = normalize(json["message_id"]),
+                   EmailMessage.looksLikeGmailMessageID(messageID) {
+                    return messageID
+                }
+                if let idValue = normalize(json["id"]),
+                   EmailMessage.looksLikeGmailMessageID(idValue) {
+                    return idValue
+                }
+                return nil
+            }()
+        let hasAttachmentValue =
+            (json["has_attachment"] as? Bool ?? false) ||
+            (json["has_attachments"] as? Bool ?? false) ||
+            ((json["attachment_count"] as? Int ?? 0) > 0) ||
+            ((json["attachments"] as? [[String: Any]])?.isEmpty == false)
+        let threadIDValue: String? =
+            (json["thread_id"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? (json["threadId"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? (json["conversation_id"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? (json["conversation_id"] as? Int).map(String.init)
+        let sizeEstimateValue = json["size_estimate"] as? Int ?? 0
+
         let bodyHTML = (rawHTML?.isEmpty == false) ? rawHTML : nil
         
         // When text is absent, keep a lightweight placeholder so the UI doesn't look empty.
@@ -1684,7 +1793,118 @@ class EmailStore: ObservableObject {
             ? (bodyHTML == nil ? "No message body available." : "")
             : bodyText
         
-        return MessageDetailPayload(bodyText: effectiveText, bodyHTML: bodyHTML)
+        return MessageDetailPayload(
+            bodyText: effectiveText,
+            bodyHTML: bodyHTML,
+            gmailMessageID: gmailMessageIDValue,
+            from: fromValue,
+            to: toValue,
+            cc: ccValue,
+            bcc: bccValue,
+            subject: subjectValue,
+            date: dateValue,
+            labels: labelsValue,
+            hasAttachment: hasAttachmentValue,
+            threadID: threadIDValue,
+            sizeEstimate: sizeEstimateValue
+        )
+    }
+
+    private func mergedMessage(_ base: EmailMessage, with detail: MessageDetailPayload) -> EmailMessage {
+        let from = detail.from.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? base.from : detail.from
+        let to = detail.to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? base.to : detail.to
+        let cc = detail.cc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? base.cc : detail.cc
+        let bcc = detail.bcc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? base.bcc : detail.bcc
+        let subject = detail.subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? base.subject : detail.subject
+        let date = detail.date.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? base.date : detail.date
+        let labels = detail.labels.isEmpty ? base.labels : detail.labels
+        let gmailMessageID = detail.gmailMessageID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? detail.gmailMessageID
+            : base.gmailMessageID
+        let threadID = detail.threadID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? detail.threadID
+            : base.threadID
+        let sizeEstimate = detail.sizeEstimate > 0 ? detail.sizeEstimate : base.sizeEstimate
+
+        return EmailMessage(
+            id: base.id,
+            gmailMessageID: gmailMessageID,
+            from: from,
+            to: to,
+            cc: cc,
+            bcc: bcc,
+            subject: subject,
+            date: date,
+            snippet: base.snippet,
+            labels: labels,
+            hasAttachment: base.hasAttachment || detail.hasAttachment,
+            threadID: threadID,
+            sizeEstimate: sizeEstimate
+        )
+    }
+
+    private func parseAddressList(_ raw: Any?) -> String {
+        guard let raw else { return "" }
+
+        if let value = raw as? String {
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if let values = raw as? [String] {
+            return values
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+        }
+
+        if let value = raw as? [String: Any] {
+            return parseAddressEntry(value)
+        }
+
+        if let values = raw as? [[String: Any]] {
+            return values
+                .map(parseAddressEntry)
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+        }
+
+        if let values = raw as? [Any] {
+            return values
+                .compactMap(parseAddressEntry(from:))
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+        }
+
+        return ""
+    }
+
+    private func parseAddressEntry(from raw: Any) -> String? {
+        if let value = raw as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let value = raw as? [String: Any] {
+            let parsed = parseAddressEntry(value)
+            return parsed.isEmpty ? nil : parsed
+        }
+        return nil
+    }
+
+    private func parseAddressEntry(_ raw: [String: Any]) -> String {
+        let email = (raw["email"] as? String
+            ?? raw["address"] as? String
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (raw["name"] as? String
+            ?? raw["display_name"] as? String
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !name.isEmpty && !email.isEmpty && name.caseInsensitiveCompare(email) != .orderedSame {
+            return "\(name) <\(email)>"
+        }
+        if !email.isEmpty { return email }
+        return name
     }
     
     private func extractNumber(from line: String) -> Int? {

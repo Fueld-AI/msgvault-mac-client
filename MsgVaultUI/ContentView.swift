@@ -16,6 +16,7 @@ struct ContentView: View {
     @Environment(\.appAccentColor) private var accentColor
     @AppStorage("appTheme") private var appThemeRawValue = AppTheme.teal.rawValue
     @State private var selectedTab: SidebarTab = .search
+    @State private var showThemeQuickSwitcher = false
     
     enum SidebarTab: String, CaseIterable {
         case search = "Search"
@@ -153,13 +154,95 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    appearanceModeRawValue = (colorScheme == .light ? AppearanceMode.dark : AppearanceMode.light).rawValue
-                } label: {
-                    Image(systemName: colorScheme == .light ? "moon.fill" : "sun.max.fill")
+                HStack(spacing: 8) {
+                    themeQuickSwitcherButton
+
+                    Button {
+                        appearanceModeRawValue = (colorScheme == .light ? AppearanceMode.dark : AppearanceMode.light).rawValue
+                    } label: {
+                        Image(systemName: colorScheme == .light ? "moon.fill" : "sun.max.fill")
+                    }
+                    .help(colorScheme == .light ? "Switch to Dark Mode" : "Switch to Light Mode")
                 }
-                .help(colorScheme == .light ? "Switch to Dark Mode" : "Switch to Light Mode")
+                .padding(.leading, 12)
             }
+        }
+    }
+
+    private var themeQuickSwitcherButton: some View {
+        Button {
+            showThemeQuickSwitcher.toggle()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [appTheme.accentColor.opacity(0.95), appTheme.accentColor.opacity(0.60)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Image(systemName: "paintpalette.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+            }
+            .frame(width: 26, height: 26)
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Quick theme switcher")
+        .popover(isPresented: $showThemeQuickSwitcher, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Theme")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .top, spacing: 12) {
+                    Capsule()
+                        .fill(accentColor.opacity(0.55))
+                        .frame(width: 2)
+                        .padding(.vertical, 2)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(AppTheme.allCases) { theme in
+                            Button {
+                                appThemeRawValue = theme.rawValue
+                                showThemeQuickSwitcher = false
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Circle()
+                                        .fill(theme.accentColor)
+                                        .frame(width: 11, height: 11)
+
+                                    Text(theme.label)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(.primary)
+
+                                    Spacer(minLength: 8)
+
+                                    if appTheme == theme {
+                                        Image(systemName: "checkmark")
+                                            .font(.subheadline.weight(.bold))
+                                            .foregroundStyle(theme.accentColor)
+                                    }
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(appTheme == theme ? theme.accentColor.opacity(0.14) : Color.clear)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(width: 220)
         }
     }
 }
@@ -2843,6 +2926,10 @@ struct MessageRowView: View {
 struct MessageDetailView: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.appAccentColor) private var accentColor
+    @AppStorage("gmail.open.confirm") private var confirmBeforeOpeningGmail = true
+    @AppStorage("gmail.open.authuserHint") private var gmailAuthUserHint = ""
+    @State private var pendingGmailURL: URL?
+    @State private var showGmailOpenConfirmation = false
 
     private static let isoFull = ISO8601DateFormatter()
     private static let isoFrac: ISO8601DateFormatter = {
@@ -2863,137 +2950,254 @@ struct MessageDetailView: View {
         return raw
     }
 
+    private func gmailMessageURL(for message: EmailMessage) -> URL? {
+        let fallbackID = EmailMessage.looksLikeGmailMessageID(message.id) ? message.id : nil
+        guard let messageID = (message.gmailMessageID ?? fallbackID)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !messageID.isEmpty else {
+            return nil
+        }
+
+        if looksLikeHexMessageID(messageID),
+           var components = URLComponents(string: "https://mail.google.com/mail/") {
+            let authHint = gmailAuthUserHint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !authHint.isEmpty {
+                components.queryItems = [URLQueryItem(name: "authuser", value: authHint)]
+            }
+            components.fragment = "all/\(messageID.lowercased())"
+            if let url = components.url {
+                return url
+            }
+        }
+
+        if let decimalMessageID = decimalGmailMessageID(fromHexLike: messageID),
+           var components = URLComponents(string: "https://mail.google.com/mail/") {
+            let authHint = gmailAuthUserHint.trimmingCharacters(in: .whitespacesAndNewlines)
+            let perm = "msg-f:\(decimalMessageID)"
+            var items: [URLQueryItem] = [
+                URLQueryItem(name: "view", value: "pt"),
+                URLQueryItem(name: "search", value: "all"),
+                URLQueryItem(name: "permmsgid", value: perm),
+                URLQueryItem(name: "simpl", value: perm)
+            ]
+            if !authHint.isEmpty {
+                items.append(URLQueryItem(name: "authuser", value: authHint))
+            }
+            components.queryItems = items
+            if let url = components.url {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func looksLikeHexMessageID(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let hexDigits = CharacterSet(charactersIn: "0123456789abcdef")
+        return normalized.rangeOfCharacter(from: hexDigits.inverted) == nil
+    }
+
+    private func decimalGmailMessageID(fromHexLike rawValue: String) -> String? {
+        let normalized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "0x", with: "")
+
+        guard !normalized.isEmpty else { return nil }
+        let hexDigits = CharacterSet(charactersIn: "0123456789abcdef")
+        guard normalized.rangeOfCharacter(from: hexDigits.inverted) == nil else {
+            return nil
+        }
+        guard let numeric = UInt64(normalized, radix: 16) else {
+            return nil
+        }
+        return String(numeric)
+    }
+
+    private func openGmailURL(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    private func showMessageInGmail(_ url: URL) {
+        guard confirmBeforeOpeningGmail else {
+            openGmailURL(url)
+            return
+        }
+        pendingGmailURL = url
+        showGmailOpenConfirmation = true
+    }
+
+    private func confirmOpenInGmail(alwaysAllow: Bool) {
+        guard let url = pendingGmailURL else { return }
+        if alwaysAllow {
+            confirmBeforeOpeningGmail = false
+        }
+        pendingGmailURL = nil
+        showGmailOpenConfirmation = false
+        openGmailURL(url)
+    }
+
     var body: some View {
-        if let message = store.selectedMessage {
-            VStack(alignment: .leading, spacing: 12) {
-                // Header
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(message.subject)
-                        .font(.title2.bold())
+        Group {
+            if let message = store.selectedMessage {
+                VStack(alignment: .leading, spacing: 12) {
+                    // Header
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(message.subject)
+                                .font(.title2.bold())
+                                .frame(maxWidth: .infinity, alignment: .leading)
 
-                    // From + Date row
-                    HStack(alignment: .top, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("From")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(message.from)
-                                .font(.subheadline)
+                            if let gmailURL = gmailMessageURL(for: message) {
+                                Button {
+                                    showMessageInGmail(gmailURL)
+                                } label: {
+                                    Label("Show in Gmail", systemImage: "arrow.up.right.square")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .help("Open this specific message in Gmail")
+                            }
+                        }
+
+                        // From + Date row
+                        HStack(alignment: .top, spacing: 16) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("From")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(message.from)
+                                    .font(.subheadline)
+                                    .textSelection(.enabled)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("Date")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(formatDate(message.date))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+
+                        // To / CC / BCC grid
+                        if !message.to.isEmpty || !message.cc.isEmpty || !message.bcc.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                if !message.to.isEmpty {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text("To")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 24, alignment: .trailing)
+                                        Text(message.to)
+                                            .font(.caption)
+                                            .foregroundStyle(.primary)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                if !message.cc.isEmpty {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text("CC")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 24, alignment: .trailing)
+                                        Text(message.cc)
+                                            .font(.caption)
+                                            .foregroundStyle(.primary)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                if !message.bcc.isEmpty {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text("BCC")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 24, alignment: .trailing)
+                                        Text(message.bcc)
+                                            .font(.caption)
+                                            .foregroundStyle(accentColor.opacity(0.85))
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            }
+                            .padding(8)
+                            .background(Color.primary.opacity(0.04))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        }
+
+                        if !message.labels.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 4) {
+                                    ForEach(message.labels, id: \.self) { label in
+                                        Text(formatLabel(label))
+                                            .font(.caption)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(accentColor.opacity(0.12))
+                                            .foregroundStyle(accentColor)
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding()
+                    .background(.background.secondary)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    
+                    // Body
+                    if let html = store.messageDetailHTML, !html.isEmpty {
+                        MessageHTMLView(html: html)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+                    } else if !store.messageDetail.isEmpty {
+                        ScrollView {
+                            Text(store.messageDetail)
+                                .font(.body)
                                 .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(.background.secondary)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
                         Spacer()
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text("Date")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(formatDate(message.date))
-                                .font(.subheadline)
-                                .foregroundStyle(.primary)
-                        }
-                    }
-
-                    // To / CC / BCC grid
-                    if !message.to.isEmpty || !message.cc.isEmpty || !message.bcc.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            if !message.to.isEmpty {
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text("To")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 24, alignment: .trailing)
-                                    Text(message.to)
-                                        .font(.caption)
-                                        .foregroundStyle(.primary)
-                                        .textSelection(.enabled)
-                                }
-                            }
-                            if !message.cc.isEmpty {
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text("CC")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 24, alignment: .trailing)
-                                    Text(message.cc)
-                                        .font(.caption)
-                                        .foregroundStyle(.primary)
-                                        .textSelection(.enabled)
-                                }
-                            }
-                            if !message.bcc.isEmpty {
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text("BCC")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 24, alignment: .trailing)
-                                    Text(message.bcc)
-                                        .font(.caption)
-                                        .foregroundStyle(accentColor.opacity(0.85))
-                                        .textSelection(.enabled)
-                                }
-                            }
-                        }
-                        .padding(8)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                    }
-
-                    if !message.labels.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 4) {
-                                ForEach(message.labels, id: \.self) { label in
-                                    Text(formatLabel(label))
-                                        .font(.caption)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(accentColor.opacity(0.12))
-                                        .foregroundStyle(accentColor)
-                                        .clipShape(Capsule())
-                                }
-                            }
-                        }
+                        ProgressView()
+                        Spacer()
                     }
                 }
                 .padding()
-                .background(.background.secondary)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                
-                // Body
-                if let html = store.messageDetailHTML, !html.isEmpty {
-                    MessageHTMLView(html: html)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                        )
-                } else if !store.messageDetail.isEmpty {
-                    ScrollView {
-                        Text(store.messageDetail)
-                            .font(.body)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.background.secondary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "envelope.open")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("Select a message to view details")
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            VStack(spacing: 12) {
-                Image(systemName: "envelope.open")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.tertiary)
-                Text("Select a message to view details")
-                    .foregroundStyle(.secondary)
+        }
+        .alert("Open in Gmail?", isPresented: $showGmailOpenConfirmation) {
+            Button("Open Once") {
+                confirmOpenInGmail(alwaysAllow: false)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Button("Always Open (Don't Ask Again)") {
+                confirmOpenInGmail(alwaysAllow: true)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingGmailURL = nil
+            }
+        } message: {
+            Text("This will open your default browser to show this specific message in Gmail.")
         }
     }
 }
@@ -3115,6 +3319,12 @@ struct SendersView: View {
     private var normalizedSenderQuery: String {
         senderSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
+    private var normalizedSenderQueryCompact: String {
+        compactAlphanumeric(normalizedSenderQuery)
+    }
+    private var normalizedSenderQueryTokens: [String] {
+        senderSearchTokens(from: normalizedSenderQuery)
+    }
     private var isSearchingAllSenders: Bool { !normalizedSenderQuery.isEmpty }
     private var senderSource: [SenderAggregate] {
         if isSearchingAllSenders {
@@ -3124,9 +3334,7 @@ struct SendersView: View {
     }
     private var filteredSenders: [SenderAggregate] {
         guard isSearchingAllSenders else { return senderSource }
-        return senderSource.filter { sender in
-            sender.name.lowercased().contains(normalizedSenderQuery) || sender.email.lowercased().contains(normalizedSenderQuery)
-        }
+        return senderSource.filter(matchesSenderSearch)
     }
 
     private var displayedSenders: [SenderAggregate] {
@@ -3158,7 +3366,7 @@ struct SendersView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    TextField("Search senders...", text: $senderSearchText)
+                    TextField("Search any sender or email...", text: $senderSearchText)
                         .textFieldStyle(.plain)
                 }
                 .padding(.horizontal, 10)
@@ -3261,7 +3469,7 @@ struct SendersView: View {
                                                 .stroke(accentColor.opacity(0.35), lineWidth: 1)
                                         )
                                         .shadow(color: accentColor.opacity(0.25), radius: 3, y: 1)
-                                        .offset(x: 14, y: -12)
+                                        .offset(x: 14, y: -6)
                                 }
                             }
                     }
@@ -3344,6 +3552,90 @@ struct SendersView: View {
         .padding(.vertical, 6)
     }
 
+    private func matchesSenderSearch(_ sender: SenderAggregate) -> Bool {
+        let senderName = sender.name.lowercased()
+        let senderEmail = sender.email.lowercased()
+        let senderEmailLocalPart = emailLocalPart(from: senderEmail)
+        let queryIncludesAtSymbol = normalizedSenderQuery.contains("@")
+
+        if senderName.contains(normalizedSenderQuery) || senderEmailLocalPart.contains(normalizedSenderQuery) {
+            return true
+        }
+        if queryIncludesAtSymbol && senderEmail.contains(normalizedSenderQuery) {
+            return true
+        }
+
+        let compactSenderName = compactAlphanumeric(senderName)
+        let compactSenderEmailLocalPart = compactAlphanumeric(senderEmailLocalPart)
+        let compactSenderEmail = compactAlphanumeric(senderEmail)
+
+        if !normalizedSenderQueryCompact.isEmpty &&
+            (compactSenderName.contains(normalizedSenderQueryCompact) ||
+             compactSenderEmailLocalPart.contains(normalizedSenderQueryCompact)) {
+            return true
+        }
+        if queryIncludesAtSymbol &&
+            !normalizedSenderQueryCompact.isEmpty &&
+            compactSenderEmail.contains(normalizedSenderQueryCompact) {
+            return true
+        }
+
+        if !normalizedSenderQueryTokens.isEmpty &&
+            normalizedSenderQueryTokens.allSatisfy({ token in
+                compactSenderName.contains(token) ||
+                compactSenderEmailLocalPart.contains(token) ||
+                isOrderedSubsequence(token, in: compactSenderName) ||
+                isOrderedSubsequence(token, in: compactSenderEmailLocalPart) ||
+                (queryIncludesAtSymbol &&
+                 (compactSenderEmail.contains(token) || isOrderedSubsequence(token, in: compactSenderEmail)))
+            }) {
+            return true
+        }
+
+        if normalizedSenderQueryCompact.count >= 4 &&
+            (isOrderedSubsequence(normalizedSenderQueryCompact, in: compactSenderName) ||
+             isOrderedSubsequence(normalizedSenderQueryCompact, in: compactSenderEmailLocalPart)) {
+            return true
+        }
+
+        return false
+    }
+
+    private func emailLocalPart(from email: String) -> String {
+        guard let atIndex = email.firstIndex(of: "@") else { return email }
+        return String(email[..<atIndex])
+    }
+
+    private func senderSearchTokens(from value: String) -> [String] {
+        let folded = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        return folded
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .map(compactAlphanumeric)
+            .filter { !$0.isEmpty }
+    }
+
+    private func compactAlphanumeric(_ value: String) -> String {
+        let folded = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        var compact = ""
+        compact.reserveCapacity(folded.count)
+        for scalar in folded.unicodeScalars where CharacterSet.alphanumerics.contains(scalar) {
+            compact.append(String(scalar).lowercased())
+        }
+        return compact
+    }
+
+    private func isOrderedSubsequence(_ needle: String, in haystack: String) -> Bool {
+        guard !needle.isEmpty else { return true }
+        var index = needle.startIndex
+        for character in haystack where character == needle[index] {
+            index = needle.index(after: index)
+            if index == needle.endIndex {
+                return true
+            }
+        }
+        return false
+    }
+
     private func syncSelectionToVisibleSenders() {
         let visibleEmails = Set(displayedSenders.map(\.email))
         if let locked = lockedSender, !visibleEmails.contains(locked.email) {
@@ -3361,6 +3653,8 @@ struct SendersView: View {
 struct SenderDetailPanel: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.appAccentColor) private var accentColor
+    @AppStorage("gmail.open.confirm") private var confirmBeforeOpeningGmail = true
+    @AppStorage("gmail.open.authuserHint") private var gmailAuthUserHint = ""
 
     let sender: SenderAggregate
     @Binding var detailFilter: String
@@ -3386,6 +3680,8 @@ struct SenderDetailPanel: View {
     @State private var isRunningRemoteFilterSearch = false
     @State private var remoteFilterError: String?
     @State private var remoteFilterTask: Task<Void, Never>?
+    @State private var pendingGmailURL: URL?
+    @State private var showGmailOpenConfirmation = false
 
     private enum SenderRelativeDatePreset: String, CaseIterable, Identifiable {
         case none
@@ -3489,6 +3785,90 @@ struct SenderDetailPanel: View {
         let date = sortableDate(value)
         guard date != .distantPast else { return value }
         return Self.displayDateFormatter.string(from: date)
+    }
+
+    private func gmailMessageURL(for message: EmailMessage) -> URL? {
+        let fallbackID = EmailMessage.looksLikeGmailMessageID(message.id) ? message.id : nil
+        guard let messageID = (message.gmailMessageID ?? fallbackID)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !messageID.isEmpty else {
+            return nil
+        }
+
+        if looksLikeHexMessageID(messageID),
+           var components = URLComponents(string: "https://mail.google.com/mail/") {
+            let authHint = gmailAuthUserHint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !authHint.isEmpty {
+                components.queryItems = [URLQueryItem(name: "authuser", value: authHint)]
+            }
+            components.fragment = "all/\(messageID.lowercased())"
+            if let url = components.url {
+                return url
+            }
+        }
+
+        if let decimalMessageID = decimalGmailMessageID(fromHexLike: messageID),
+           var components = URLComponents(string: "https://mail.google.com/mail/") {
+            let authHint = gmailAuthUserHint.trimmingCharacters(in: .whitespacesAndNewlines)
+            let perm = "msg-f:\(decimalMessageID)"
+            var items: [URLQueryItem] = [
+                URLQueryItem(name: "view", value: "pt"),
+                URLQueryItem(name: "search", value: "all"),
+                URLQueryItem(name: "permmsgid", value: perm),
+                URLQueryItem(name: "simpl", value: perm)
+            ]
+            if !authHint.isEmpty {
+                items.append(URLQueryItem(name: "authuser", value: authHint))
+            }
+            components.queryItems = items
+            if let url = components.url {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func looksLikeHexMessageID(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        let hexDigits = CharacterSet(charactersIn: "0123456789abcdef")
+        return normalized.rangeOfCharacter(from: hexDigits.inverted) == nil
+    }
+
+    private func decimalGmailMessageID(fromHexLike rawValue: String) -> String? {
+        let normalized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "0x", with: "")
+
+        guard !normalized.isEmpty else { return nil }
+        let hexDigits = CharacterSet(charactersIn: "0123456789abcdef")
+        guard normalized.rangeOfCharacter(from: hexDigits.inverted) == nil else {
+            return nil
+        }
+        guard let numeric = UInt64(normalized, radix: 16) else {
+            return nil
+        }
+        return String(numeric)
+    }
+
+    private func showMessageInGmail(_ url: URL) {
+        guard confirmBeforeOpeningGmail else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        pendingGmailURL = url
+        showGmailOpenConfirmation = true
+    }
+
+    private func confirmOpenInGmail(alwaysAllow: Bool) {
+        guard let url = pendingGmailURL else { return }
+        if alwaysAllow {
+            confirmBeforeOpeningGmail = false
+        }
+        pendingGmailURL = nil
+        showGmailOpenConfirmation = false
+        NSWorkspace.shared.open(url)
     }
 
     private var isLoadingMessages: Bool {
@@ -3834,6 +4214,9 @@ struct SenderDetailPanel: View {
 
             // Right column: message detail
             if let message = selectedMessage {
+                let toRecipients = message.to.trimmingCharacters(in: .whitespacesAndNewlines)
+                let ccRecipients = message.cc.trimmingCharacters(in: .whitespacesAndNewlines)
+                let bccRecipients = message.bcc.trimmingCharacters(in: .whitespacesAndNewlines)
                 VStack(alignment: .leading, spacing: 0) {
                     // Detail header
                     VStack(alignment: .leading, spacing: 6) {
@@ -3845,16 +4228,33 @@ struct SenderDetailPanel: View {
                                 Text("From").font(.caption).foregroundStyle(.secondary)
                                 Text(message.from).font(.subheadline).lineLimit(1)
                             }
-                            if !message.to.isEmpty {
+                            if !toRecipients.isEmpty {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text("To").font(.caption).foregroundStyle(.secondary)
-                                    Text(message.to).font(.subheadline).lineLimit(1)
+                                    Text(toRecipients).font(.subheadline).lineLimit(1)
                                 }
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 1) {
                                 Text("Date").font(.caption).foregroundStyle(.secondary)
                                 Text(displayDate(message.date)).font(.subheadline)
+                            }
+                        }
+                        if !ccRecipients.isEmpty || !bccRecipients.isEmpty {
+                            HStack(alignment: .top, spacing: 16) {
+                                if !ccRecipients.isEmpty {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("CC").font(.caption).foregroundStyle(.secondary)
+                                        Text(ccRecipients).font(.caption).lineLimit(2)
+                                    }
+                                }
+                                if !bccRecipients.isEmpty {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("BCC").font(.caption).foregroundStyle(.secondary)
+                                        Text(bccRecipients).font(.caption).lineLimit(2)
+                                    }
+                                }
+                                Spacer()
                             }
                         }
                         if !message.labels.isEmpty {
@@ -3874,16 +4274,28 @@ struct SenderDetailPanel: View {
                     .padding(12)
                     .background(Color(NSColor.controlBackgroundColor))
                     .overlay(alignment: .topTrailing) {
-                        Button {
-                            selectedMessage = nil
-                            localMessageDetail = ""
-                            localMessageDetailHTML = nil
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 16))
-                                .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            if let gmailURL = gmailMessageURL(for: message) {
+                                Button {
+                                    showMessageInGmail(gmailURL)
+                                } label: {
+                                    Label("Show in Gmail", systemImage: "arrow.up.right.square")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .help("Open this specific message in Gmail")
+                            }
+                            Button {
+                                selectedMessage = nil
+                                localMessageDetail = ""
+                                localMessageDetailHTML = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                         .padding(10)
                     }
 
@@ -3948,6 +4360,19 @@ struct SenderDetailPanel: View {
         .onChange(of: filterLabel) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
         .onDisappear {
             remoteFilterTask?.cancel()
+        }
+        .alert("Open in Gmail?", isPresented: $showGmailOpenConfirmation) {
+            Button("Open Once") {
+                confirmOpenInGmail(alwaysAllow: false)
+            }
+            Button("Always Open (Don't Ask Again)") {
+                confirmOpenInGmail(alwaysAllow: true)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingGmailURL = nil
+            }
+        } message: {
+            Text("This will open your default browser to show this specific message in Gmail.")
         }
     }
 
@@ -4163,7 +4588,8 @@ struct SenderDetailPanel: View {
         localMessageDetailHTML = nil
         isLoadingDetail = true
         Task {
-            let (text, html) = await store.fetchMessageDetail(id: message.id)
+            let (detailMessage, text, html) = await store.fetchMessageDetail(for: message)
+            selectedMessage = detailMessage
             localMessageDetail = text
             localMessageDetailHTML = html
             isLoadingDetail = false
@@ -5104,6 +5530,8 @@ struct SettingsView: View {
     @State private var aiTestOutput = ""
     @AppStorage("appTheme") private var appThemeRawValue = AppTheme.teal.rawValue
     @AppStorage("appearanceMode") private var appearanceModeRawValue = AppearanceMode.system.rawValue
+    @AppStorage("gmail.open.confirm") private var confirmBeforeOpeningGmail = true
+    @AppStorage("gmail.open.authuserHint") private var gmailAuthUserHint = ""
 
     private enum SettingsTab: String, CaseIterable, Identifiable {
         case binary = "Vault Setup"
@@ -5231,6 +5659,18 @@ struct SettingsView: View {
     
     private var binaryTab: some View {
         Form {
+            Section("External Links") {
+                Toggle("Ask before opening Gmail from message detail", isOn: $confirmBeforeOpeningGmail)
+                    .tint(accentColor)
+                Text("When enabled, the first click on 'Show in Gmail' asks for confirmation and offers a 'don't ask again' option.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Gmail account hint (optional: 0, 1, or email)", text: $gmailAuthUserHint)
+                Text("Use this for multi-account Gmail. Example: 1 or yourname@gmail.com")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("msgvault Binary") {
                 TextField("Path to msgvault", text: $binaryPath)
                 
@@ -5355,12 +5795,12 @@ struct SettingsView: View {
                     .environmentObject(store)
                 AIModelPicker(aiModelDraft: $aiModelDraft, modelCatalog: modelCatalog)
                     .environmentObject(store)
+                AITranslationTest(aiTestInput: $aiTestInput, aiTestOutput: $aiTestOutput)
+                    .environmentObject(store)
                 Divider()
                 AIModelCatalog(aiModelDraft: $aiModelDraft, catalogByProvider: catalogByProvider)
                     .environmentObject(store)
-                Divider()
-                AITranslationTest(aiTestInput: $aiTestInput, aiTestOutput: $aiTestOutput)
-                    .environmentObject(store)
+                    .padding(.bottom, 28)
             }
             .padding()
         }
@@ -5652,6 +6092,7 @@ private struct AITranslationTest: View {
     @Environment(\.appAccentColor) private var accentColor
     @Binding var aiTestInput: String
     @Binding var aiTestOutput: String
+    @State private var isRunningTest = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -5661,33 +6102,41 @@ private struct AITranslationTest: View {
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(2...4)
             HStack {
-                Button("Run Test") {
-                    Task {
+                Button {
+                    Task { @MainActor in
+                        isRunningTest = true
+                        defer { isRunningTest = false }
                         if let result = await store.translateNaturalLanguageSearch(aiTestInput) {
                             aiTestOutput = result.query
                         } else {
                             aiTestOutput = "No output — check runtime status above."
                         }
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isRunningTest {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(isRunningTest ? "Running..." : "Run Test")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(accentColor)
-                .disabled(!store.ollamaReachable || !store.aiSearchEnabled || store.isInstallingAIModel)
+                .disabled(!store.ollamaReachable || !store.aiSearchEnabled || store.isInstallingAIModel || isRunningTest)
 
                 if !aiTestOutput.isEmpty {
                     Button("Clear") { aiTestOutput = "" }.buttonStyle(.bordered)
                 }
             }
-            if !aiTestOutput.isEmpty {
-                Text(aiTestOutput)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(accentColor)
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(accentColor.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+            Text(aiTestOutput.isEmpty ? "Run a test to preview the query output here." : aiTestOutput)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(aiTestOutput.isEmpty ? .secondary : accentColor)
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .background(accentColor.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
 }
