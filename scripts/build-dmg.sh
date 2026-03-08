@@ -121,9 +121,23 @@ if [[ "$NOTARIZE" == "1" ]]; then
 
   log "Stapling notarization ticket"
   xcrun stapler staple "$DMG_PATH"
+  xcrun stapler validate "$DMG_PATH"
 
   log "Gatekeeper verification"
-  spctl -a -vv -t open "$DMG_PATH"
+  set +e
+  spctl_output="$(spctl -a -vv -t open "$DMG_PATH" 2>&1)"
+  spctl_status=$?
+  set -e
+  if [[ $spctl_status -ne 0 ]]; then
+    if [[ "$spctl_output" == *"Insufficient Context"* ]]; then
+      log "Gatekeeper open check returned 'Insufficient Context' (common for local DMG checks)."
+      printf "%s\n" "$spctl_output"
+    else
+      fail "Gatekeeper verification failed:\n$spctl_output"
+    fi
+  else
+    printf "%s\n" "$spctl_output"
+  fi
 else
   log "NOTARIZE=0, skipping notarization and stapling"
 fi
