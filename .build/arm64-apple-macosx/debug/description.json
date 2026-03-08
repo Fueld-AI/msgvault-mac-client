@@ -3,7 +3,48 @@
 
   ],
   "copyCommands" : {
-
+    "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI_MsgVaultUI.bundle/README.md" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/Resources/Branding/README.md"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI_MsgVaultUI.bundle/README.md"
+        }
+      ]
+    },
+    "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI_MsgVaultUI.bundle/fueld-logo-dark.png" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/Resources/Branding/fueld-logo-dark.png"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI_MsgVaultUI.bundle/fueld-logo-dark.png"
+        }
+      ]
+    },
+    "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI_MsgVaultUI.bundle/fueld-logo-light.png" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/Resources/Branding/fueld-logo-light.png"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI_MsgVaultUI.bundle/fueld-logo-light.png"
+        }
+      ]
+    }
   },
   "explicitTargetDependencyImportCheckingMode" : {
     "none" : {
@@ -40,11 +81,23 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SetupWizard.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SpeechInputManager.swift"
         },
         {
           "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<MsgVaultUI-arm64-apple-macosx26.0-debug.module-resources>"
         },
         {
           "kind" : "file",
@@ -59,7 +112,9 @@
         "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/ContentView.swift.o",
         "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/EmailStore.swift.o",
         "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.swift.o",
-        "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.swift.o"
+        "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SetupWizard.swift.o",
+        "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.swift.o",
+        "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/resource_bundle_accessor.swift.o"
       ],
       "otherArguments" : [
         "-target",
@@ -74,7 +129,7 @@
         "-j16",
         "-DSWIFT_PACKAGE",
         "-DDEBUG",
-        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
         "-module-cache-path",
         "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/ModuleCache",
         "-parseable-output",
@@ -136,7 +191,15 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SetupWizard.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/resource_bundle_accessor.swift.o"
         },
         {
           "kind" : "file",
@@ -149,7 +212,9 @@
         "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/ContentView.swift",
         "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/EmailStore.swift",
         "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/MsgVaultUIApp.swift",
-        "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SpeechInputManager.swift"
+        "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SetupWizard.swift",
+        "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SpeechInputManager.swift",
+        "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/DerivedSources/resource_bundle_accessor.swift"
       ],
       "tempsPath" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build",
       "wholeModuleOptimization" : false
@@ -170,7 +235,9 @@
       "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/ContentView.swift",
       "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/EmailStore.swift",
       "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/MsgVaultUIApp.swift",
+      "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SetupWizard.swift",
       "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SpeechInputManager.swift",
+      "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/DerivedSources/resource_bundle_accessor.swift",
       "-I",
       "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/Modules",
       "-target",
@@ -185,7 +252,7 @@
       "-j16",
       "-DSWIFT_PACKAGE",
       "-DDEBUG",
-      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
       "-module-cache-path",
       "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/ModuleCache",
       "-parseable-output",
@@ -286,7 +353,15 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SetupWizard.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SpeechInputManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/DerivedSources/resource_bundle_accessor.swift"
         }
       ],
       "outputFilePath" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/sources"
@@ -316,7 +391,15 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SetupWizard.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SpeechInputManager.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/resource_bundle_accessor.swift.o"
         }
       ],
       "outputFilePath" : "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.product/Objects.LinkFileList"

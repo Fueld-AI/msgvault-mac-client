@@ -8,7 +8,10 @@ let package = Package(
         .executableTarget(
             name: "MsgVaultUI",
             path: "MsgVaultUI",
-            exclude: ["Info.plist"]
+            exclude: ["Info.plist"],
+            resources: [
+                .process("Resources")
+            ]
         )
     ]
 )

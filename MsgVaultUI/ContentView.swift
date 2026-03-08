@@ -17,6 +17,12 @@ struct ContentView: View {
     @AppStorage("appTheme") private var appThemeRawValue = AppTheme.teal.rawValue
     @State private var selectedTab: SidebarTab = .search
     @State private var showThemeQuickSwitcher = false
+    @State private var showSetupWizardSheet = false
+    @State private var showSetupWizardFullScreen = false
+    @State private var setupWizardEntryPoint: SetupWizardEntryPoint = .settings
+    @State private var didRunInitialSetupCheck = false
+    @State private var didRouteStartupTab = false
+    @State private var defaultSettingsToVaultSetup = false
     
     enum SidebarTab: String, CaseIterable {
         case search = "Search"
@@ -45,111 +51,165 @@ struct ContentView: View {
     private var appearanceMode: AppearanceMode {
         AppearanceMode.from(rawValue: appearanceModeRawValue)
     }
+
+    private var setupConfigPath: String {
+        "\(NSHomeDirectory())/.msgvault/config.toml"
+    }
     
     var body: some View {
-        HStack(spacing: 0) {
-            // Sidebar
-            VStack(spacing: 0) {
-                // Brand header
-                HStack(spacing: 8) {
-                    Image(systemName: "envelope.badge.shield.half.filled")
-                        .font(.title2)
-                        .foregroundStyle(accentColor)
-                    Text("MsgVault")
-                        .font(.title3.bold())
-                        .foregroundStyle(.primary)
-                }
-                .padding(.vertical, 16)
-                .padding(.horizontal)
-                
-                Divider()
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(SidebarTab.allCases, id: \.self) { tab in
-                        Button {
-                            selectedTab = tab
-                        } label: {
-                            Label(tab.rawValue, systemImage: tab.icon)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 9)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(
-                            selectedTab == tab
-                                ? AnyShapeStyle(
-                                    LinearGradient(
-                                        colors: [accentColor.opacity(0.85), accentColor.opacity(0.65)],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                : AnyShapeStyle(Color.clear)
-                        )
-                        .foregroundStyle(selectedTab == tab ? .white : .primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 9))
+        ZStack {
+            HStack(spacing: 0) {
+                // Sidebar
+                VStack(spacing: 0) {
+                    // Brand header
+                    HStack(spacing: 8) {
+                        Image(systemName: "envelope.badge.shield.half.filled")
+                            .font(.title2)
+                            .foregroundStyle(accentColor)
+                        Text("MsgVault")
+                            .font(.title3.bold())
+                            .foregroundStyle(.primary)
                     }
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-                
-                Spacer()
-                
-                Divider()
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    Button {
-                        store.refreshEmailInBackground()
-                    } label: {
-                        HStack(spacing: 6) {
-                            if store.isRefreshingEmail {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                            }
-                            Text(store.isRefreshingEmail ? "Refreshing..." : "Refresh Email")
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .tint(accentColor)
-                    .disabled(store.isRefreshingEmail)
-                    .help("Sync emails from server in background")
+                    .padding(.vertical, 16)
+                    .padding(.horizontal)
                     
-                    Text(store.emailRefreshError ?? store.emailRefreshStatus)
-                        .font(.caption2)
-                        .foregroundColor(store.emailRefreshError == nil ? .secondary : .red)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Divider()
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(SidebarTab.allCases, id: \.self) { tab in
+                            Button {
+                                selectedTab = tab
+                            } label: {
+                                Label(tab.rawValue, systemImage: tab.icon)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 9)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .background(
+                                selectedTab == tab
+                                    ? AnyShapeStyle(
+                                        LinearGradient(
+                                            colors: [accentColor.opacity(0.85), accentColor.opacity(0.65)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    : AnyShapeStyle(Color.clear)
+                            )
+                            .foregroundStyle(selectedTab == tab ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
+                    
+                    Spacer()
+                    
+                    Divider()
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button {
+                            store.refreshEmailInBackground()
+                        } label: {
+                            HStack(spacing: 6) {
+                                if store.isRefreshingEmail {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                }
+                                Text(store.isRefreshingEmail ? "Refreshing..." : "Refresh Email")
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(accentColor)
+                        .disabled(store.isRefreshingEmail)
+                        .help("Sync emails from server in background")
+                        
+                        Text(store.emailRefreshError ?? store.emailRefreshStatus)
+                            .font(.caption2)
+                            .foregroundColor(store.emailRefreshError == nil ? .secondary : .red)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(10)
                 }
-                .padding(10)
+                .frame(width: 180)
+                .background(.bar)
+                
+                Divider()
+                
+                // Main content
+                switch selectedTab {
+                case .search:
+                    SearchView()
+                case .senders:
+                    SendersView()
+                case .stats:
+                    StatsView()
+                case .accounts:
+                    AccountsView {
+                        setupWizardEntryPoint = .accounts
+                        showSetupWizardSheet = true
+                    }
+                case .settings:
+                    SettingsView(defaultToVaultSetup: defaultSettingsToVaultSetup) {
+                        setupWizardEntryPoint = .settings
+                        showSetupWizardSheet = true
+                    }
+                }
             }
-            .frame(width: 180)
-            .background(.bar)
-            
-            Divider()
-            
-            // Main content
-            switch selectedTab {
-            case .search:
-                SearchView()
-            case .senders:
-                SendersView()
-            case .stats:
-                StatsView()
-            case .accounts:
-                AccountsView()
-            case .settings:
-                SettingsView()
+
+            if showSetupWizardFullScreen {
+                Color.black.opacity(0.25)
+                    .ignoresSafeArea()
+                SetupWizardView(
+                    entryPoint: setupWizardEntryPoint,
+                    presentationStyle: .fullScreen
+                ) {
+                    showSetupWizardFullScreen = false
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
         .onChange(of: store.searchForSenderRequest) { _, request in
             if request != nil {
                 selectedTab = .search
+            }
+        }
+        .onChange(of: showSetupWizardFullScreen) { _, isShowing in
+            if !isShowing {
+                refreshAfterWizard()
+            }
+        }
+        .task {
+            guard !didRunInitialSetupCheck else { return }
+            didRunInitialSetupCheck = true
+            let hasConfig = FileManager.default.fileExists(atPath: setupConfigPath)
+            if !hasConfig {
+                setupWizardEntryPoint = .firstLaunch
+                showSetupWizardFullScreen = true
+            }
+            if store.accounts.isEmpty && !store.isLoadingAccounts {
+                await store.loadAccounts()
+            }
+            routeStartupTabIfNeeded()
+        }
+        .onChange(of: store.accounts) { _, _ in
+            defaultSettingsToVaultSetup = store.accounts.isEmpty
+            routeStartupTabIfNeeded()
+        }
+        .sheet(isPresented: $showSetupWizardSheet, onDismiss: refreshAfterWizard) {
+            SetupWizardView(
+                entryPoint: setupWizardEntryPoint,
+                presentationStyle: .sheet
+            ) {
+                showSetupWizardSheet = false
             }
         }
         .toolbar {
@@ -244,6 +304,24 @@ struct ContentView: View {
             .padding(14)
             .frame(width: 220)
         }
+    }
+
+    private func refreshAfterWizard() {
+        Task {
+            await store.loadAccounts()
+            await store.loadStats()
+        }
+    }
+
+    private func routeStartupTabIfNeeded() {
+        guard !didRouteStartupTab else { return }
+        guard !store.isLoadingAccounts else { return }
+        let hasConnectedAccounts = !store.accounts.isEmpty
+        defaultSettingsToVaultSetup = !hasConnectedAccounts
+        if !hasConnectedAccounts {
+            selectedTab = .settings
+        }
+        didRouteStartupTab = true
     }
 }
 
@@ -5291,6 +5369,7 @@ struct AccountsView: View {
     @State private var displayName = ""
     @State private var useHeadlessFlow = false
     @State private var forceReauthorize = false
+    let onLaunchSetupWizard: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -5319,6 +5398,12 @@ struct AccountsView: View {
                         Text("Add another Gmail account to msgvault. This command usually opens your browser for OAuth.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        Button("Use guided setup wizard") {
+                            onLaunchSetupWizard()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
 
                         FilterField(label: "Email address", placeholder: "e.g. work@company.com", text: $accountEmail, icon: "envelope")
                             .disableAutocorrection(true)
@@ -5573,6 +5658,7 @@ private struct ThemeSwatch: View {
 
 struct SettingsView: View {
     @EnvironmentObject var store: EmailStore
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appAccentColor) private var accentColor
     @State private var binaryPath: String = ""
     @State private var testResult: String = ""
@@ -5584,11 +5670,14 @@ struct SettingsView: View {
     @AppStorage("appearanceMode") private var appearanceModeRawValue = AppearanceMode.system.rawValue
     @AppStorage("gmail.open.confirm") private var confirmBeforeOpeningGmail = true
     @AppStorage("gmail.open.authuserHint") private var gmailAuthUserHint = ""
+    let defaultToVaultSetup: Bool
+    let onLaunchSetupWizard: () -> Void
 
     private enum SettingsTab: String, CaseIterable, Identifiable {
         case binary = "Vault Setup"
         case theme = "Theme"
         case ai = "AI Setup"
+        case about = "About"
 
         var id: String { rawValue }
     }
@@ -5700,12 +5789,15 @@ struct SettingsView: View {
                     themeTab
                 case .ai:
                     aiTab
+                case .about:
+                    aboutTab
                 }
             }
         }
         .onAppear {
             binaryPath = store.msgvaultPath
             aiModelDraft = store.aiModelName
+            selectedTab = defaultToVaultSetup ? .binary : .ai
         }
     }
     
@@ -5765,6 +5857,17 @@ struct SettingsView: View {
                     Text("~/.msgvault/")
                         .textSelection(.enabled)
                 }
+            }
+
+            Section("Guided Setup Wizard") {
+                Text("Need help with first-time setup or adding another account? Launch the guided wizard.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Re-run Setup Wizard") {
+                    onLaunchSetupWizard()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(accentColor)
             }
         }
         .formStyle(.grouped)
@@ -5857,6 +5960,77 @@ struct SettingsView: View {
             .padding()
         }
         .task { await store.refreshAIRuntimeStatus() }
+    }
+
+    private var aboutTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Built by Fueld AI")
+                        .font(.headline)
+                    Text("MsgVault has been built by the team at Fueld AI.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    if let logo = fueldLogoImage {
+                        Image(nsImage: logo)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 240)
+                            .padding(.top, 4)
+                    } else {
+                        Label("Add Fueld logos to the app resources folder to show them here.", systemImage: "photo")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Fueld AI")
+                        .font(.headline)
+                    Text("Health intelligence, not just tracking.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Link("Visit fueld.ai", destination: URL(string: "https://fueld.ai/")!)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+            }
+            .padding()
+        }
+    }
+
+    private var fueldLogoImage: NSImage? {
+        let preferredNames = colorScheme == .dark
+            ? ["fueld-logo-dark", "Fueld-logo-dark"]
+            : ["fueld-logo-light", "Fueld-logo-light"]
+        let subdirectories: [String?] = ["Branding", "branding", nil]
+
+        for name in preferredNames {
+            for subdirectory in subdirectories {
+                if
+                    let url = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: subdirectory),
+                    let image = NSImage(contentsOf: url)
+                {
+                    return image
+                }
+            }
+        }
+        return nil
     }
     
     private func syntaxRow(_ syntax: String, _ description: String) -> some View {
