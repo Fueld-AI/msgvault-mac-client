@@ -1,0 +1,14 @@
+# Swift Package / build outputs
+.build/
+build/
+
+# SwiftPM user-specific workspace data
+.swiftpm/xcode/xcuserdata/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# Xcode user-specific data
+**/xcuserdata/
+*.xcuserstate
+
+# macOS noise
+.DS_Store

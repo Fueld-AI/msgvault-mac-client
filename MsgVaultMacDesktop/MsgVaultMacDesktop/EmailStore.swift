@@ -299,23 +299,8 @@ class EmailStore: ObservableObject {
     }
     
     private func findMsgvault() {
-        // Check common install locations
-        let paths = [
-            "/usr/local/bin/msgvault",
-            "/opt/homebrew/bin/msgvault",
-            "\(NSHomeDirectory())/.local/bin/msgvault",
-            "\(NSHomeDirectory())/go/bin/msgvault"
-        ]
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
-                msgvaultPath = path
-                return
-            }
-        }
-        // Try which
-        if let result = try? runCommand("/usr/bin/which", arguments: ["msgvault"]),
-           !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            msgvaultPath = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = RuntimePaths.resolveBinaryPath("msgvault") {
+            msgvaultPath = resolved
         }
     }
     
@@ -330,10 +315,8 @@ class EmailStore: ObservableObject {
         process.standardOutput = outputPipe
         process.standardError = outputPipe
         
-        // Pass through environment including HOME for msgvault config
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = NSHomeDirectory()
-        process.environment = env
+        // Pass through environment including HOME/PATH for msgvault config.
+        process.environment = RuntimePaths.processEnvironmentForUserHome()
         
         try process.run()
         
@@ -350,18 +333,74 @@ class EmailStore: ObservableObject {
     }
     
     private func runMsgvault(arguments: [String]) throws -> String {
-        // Force local mode so UI still works when remote REST server is unavailable.
-        try runCommand(msgvaultPath, arguments: ["--local"] + arguments)
+        var lastError: Error?
+        for executable in msgvaultExecutableCandidates() {
+            do {
+                let output = try runCommand(
+                    executable,
+                    arguments: msgvaultInvocationArguments(for: executable, commandArguments: arguments)
+                )
+                if executable != "/usr/bin/env" {
+                    msgvaultPath = executable
+                }
+                return output
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? MsgVaultError.notFound
     }
     
     private func runMsgvaultAsync(
         arguments: [String],
         timeoutSeconds: TimeInterval? = nil
     ) async throws -> String {
-        let path = msgvaultPath
-        var args = ["--local"]
-        args += arguments
-        return try await Self.executeCommand(path: path, arguments: args, timeoutSeconds: timeoutSeconds)
+        var lastError: Error?
+        for executable in msgvaultExecutableCandidates() {
+            do {
+                let output = try await Self.executeCommand(
+                    path: executable,
+                    arguments: msgvaultInvocationArguments(for: executable, commandArguments: arguments),
+                    timeoutSeconds: timeoutSeconds
+                )
+                if executable != "/usr/bin/env" {
+                    msgvaultPath = executable
+                }
+                return output
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? MsgVaultError.notFound
+    }
+
+    private func msgvaultExecutableCandidates() -> [String] {
+        var candidates: [String] = []
+        let trimmedStored = msgvaultPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedStored.isEmpty {
+            candidates.append(trimmedStored)
+        }
+        if let resolved = RuntimePaths.resolveBinaryPath("msgvault"),
+           !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            candidates.append(resolved)
+        }
+        candidates.append("/usr/bin/env")
+
+        var unique: [String] = []
+        var seen = Set<String>()
+        for candidate in candidates {
+            if seen.insert(candidate).inserted {
+                unique.append(candidate)
+            }
+        }
+        return unique
+    }
+
+    private func msgvaultInvocationArguments(for executable: String, commandArguments: [String]) -> [String] {
+        if executable == "/usr/bin/env" {
+            return ["msgvault", "--local"] + commandArguments
+        }
+        return ["--local"] + commandArguments
     }
     
     nonisolated private static func executeCommand(
@@ -378,9 +417,7 @@ class EmailStore: ObservableObject {
             process.standardOutput = outputPipe
             process.standardError = outputPipe
             
-            var env = ProcessInfo.processInfo.environment
-            env["HOME"] = NSHomeDirectory()
-            process.environment = env
+            process.environment = RuntimePaths.processEnvironmentForUserHome()
             
             try process.run()
             
@@ -838,21 +875,38 @@ class EmailStore: ObservableObject {
     }()
     
     private func findOllamaBinaryPath() -> String? {
-        let paths = [
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-            "\(NSHomeDirectory())/.local/bin/ollama"
-        ]
-        for path in paths where FileManager.default.fileExists(atPath: path) {
-            return path
-        }
-        if let resolved = try? runCommand("/usr/bin/which", arguments: ["ollama"]) {
-            let trimmed = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return trimmed
+        RuntimePaths.resolveBinaryPath("ollama")
+    }
+
+    func runTestCommand() throws -> String {
+        var lastError: Error?
+        for executable in msgvaultExecutableCandidates() {
+            do {
+                let output = try runCommand(
+                    executable,
+                    arguments: msgvaultInvocationArguments(
+                        for: executable,
+                        commandArguments: ["list-accounts", "--json"]
+                    )
+                )
+                if executable != "/usr/bin/env" {
+                    msgvaultPath = executable
+                } else if let resolved = RuntimePaths.resolveBinaryPath("msgvault") {
+                    msgvaultPath = resolved
+                }
+
+                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                let shownPath = msgvaultPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return "Connected (\(shownPath))"
+                }
+                return "Connected (\(shownPath)) \(trimmed)"
+            } catch {
+                lastError = error
             }
         }
-        return nil
+
+        throw lastError ?? MsgVaultError.notFound
     }
     
     // All structural rules applied deterministically after Pass 1.

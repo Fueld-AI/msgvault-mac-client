@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 enum RuntimePaths {
-    static func realUserHomePath() -> String {
+    nonisolated static func realUserHomePath() -> String {
         if let pw = getpwuid(getuid()) {
             let value = String(cString: pw.pointee.pw_dir)
             if !value.isEmpty {
@@ -18,7 +18,7 @@ enum RuntimePaths {
         return NSHomeDirectory()
     }
 
-    static func processEnvironmentForUserHome() -> [String: String] {
+    nonisolated static func processEnvironmentForUserHome() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = realUserHomePath()
         env["HOME"] = home
@@ -47,7 +47,7 @@ enum RuntimePaths {
         return env
     }
 
-    static func resolveBinaryPath(_ name: String) -> String? {
+    nonisolated static func resolveBinaryPath(_ name: String) -> String? {
         let home = realUserHomePath()
         let candidates = [
             "/opt/homebrew/bin/\(name)",
@@ -71,7 +71,7 @@ enum RuntimePaths {
         return nil
     }
 
-    private static func isExecutableFile(_ path: String) -> Bool {
+    nonisolated private static func isExecutableFile(_ path: String) -> Bool {
         guard !path.isEmpty else { return false }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
@@ -80,7 +80,7 @@ enum RuntimePaths {
         return FileManager.default.isExecutableFile(atPath: path)
     }
 
-    private static func runShellCommand(_ command: String) throws -> String {
+    nonisolated private static func runShellCommand(_ command: String) throws -> String {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")

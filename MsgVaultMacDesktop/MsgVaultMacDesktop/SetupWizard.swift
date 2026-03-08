@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import Foundation
+import Combine
 
 enum SetupWizardEntryPoint {
     case firstLaunch
@@ -418,18 +419,19 @@ final class SetupWizardStore: ObservableObject {
             return
         }
 
-        guard let path = msgvaultBinaryPath ?? Self.findMsgvaultBinaryPath() else {
-            errorMessage = "msgvault binary not found."
-            return
-        }
-
         isRunningCommand = true
         statusMessage = "Starting full sync in background..."
         defer { isRunningCommand = false }
 
-        let escapedPath = Self.shellQuote(path)
         let escapedEmail = Self.shellQuote(email)
-        let command = "\(escapedPath) --local sync-full \(escapedEmail) >/tmp/msgvault-sync-full.log 2>&1 &"
+        let command: String
+        if let path = msgvaultBinaryPath ?? Self.findMsgvaultBinaryPath() {
+            let escapedPath = Self.shellQuote(path)
+            command = "\(escapedPath) --local sync-full \(escapedEmail) >/tmp/msgvault-sync-full.log 2>&1 &"
+        } else {
+            // PATH fallback when absolute binary detection fails.
+            command = "/usr/bin/env msgvault --local sync-full \(escapedEmail) >/tmp/msgvault-sync-full.log 2>&1 &"
+        }
 
         do {
             _ = try await Self.executeCommand(
@@ -478,25 +480,59 @@ final class SetupWizardStore: ObservableObject {
         timeoutSeconds: TimeInterval? = nil,
         onOutput: ((String) -> Void)? = nil
     ) async throws -> String {
-        let path: String
-        if let existing = msgvaultBinaryPath {
-            path = existing
-        } else if let discovered = Self.findMsgvaultBinaryPath() {
-            msgvaultBinaryPath = discovered
-            path = discovered
-        } else {
-            throw NSError(
-                domain: "SetupWizard",
-                code: 404,
-                userInfo: [NSLocalizedDescriptionKey: "msgvault binary not found."]
-            )
+        var lastError: Error?
+        for executable in msgvaultExecutableCandidates() {
+            do {
+                let output = try await Self.executeCommand(
+                    commandPath: executable,
+                    arguments: msgvaultInvocationArguments(for: executable, commandArguments: arguments),
+                    timeoutSeconds: timeoutSeconds,
+                    onOutput: onOutput
+                )
+                if executable != "/usr/bin/env" {
+                    msgvaultBinaryPath = executable
+                } else if let resolved = Self.findMsgvaultBinaryPath() {
+                    msgvaultBinaryPath = resolved
+                }
+                return output
+            } catch {
+                lastError = error
+            }
         }
-        return try await Self.executeCommand(
-            commandPath: path,
-            arguments: ["--local"] + arguments,
-            timeoutSeconds: timeoutSeconds,
-            onOutput: onOutput
+        throw lastError ?? NSError(
+            domain: "SetupWizard",
+            code: 404,
+            userInfo: [NSLocalizedDescriptionKey: "msgvault binary not found."]
         )
+    }
+
+    private func msgvaultExecutableCandidates() -> [String] {
+        var candidates: [String] = []
+        let trimmed = msgvaultBinaryPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            candidates.append(trimmed)
+        }
+        if let discovered = Self.findMsgvaultBinaryPath(),
+           !discovered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            candidates.append(discovered)
+        }
+        candidates.append("/usr/bin/env")
+
+        var unique: [String] = []
+        var seen = Set<String>()
+        for candidate in candidates {
+            if seen.insert(candidate).inserted {
+                unique.append(candidate)
+            }
+        }
+        return unique
+    }
+
+    private func msgvaultInvocationArguments(for executable: String, commandArguments: [String]) -> [String] {
+        if executable == "/usr/bin/env" {
+            return ["msgvault", "--local"] + commandArguments
+        }
+        return ["--local"] + commandArguments
     }
 
     nonisolated private static func findMsgvaultBinaryPath() -> String? {

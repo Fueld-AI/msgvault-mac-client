@@ -5824,6 +5824,7 @@ struct SettingsView: View {
                         Task {
                             do {
                                 let output = try store.runTestCommand()
+                                binaryPath = store.msgvaultPath
                                 testResult = "✅ Connected — \(output.prefix(200))"
                             } catch {
                                 testResult = "❌ Error: \(error.localizedDescription)"
@@ -6018,12 +6019,13 @@ struct SettingsView: View {
         let preferredNames = colorScheme == .dark
             ? ["fueld-logo-dark", "Fueld-logo-dark"]
             : ["fueld-logo-light", "Fueld-logo-light"]
-        let subdirectories: [String?] = ["Branding", "branding", nil]
+        let subdirectories: [String?] = ["Branding", "branding", "Resources/Branding", "Resources/branding", nil]
+        let bundle = resourceBundle
 
         for name in preferredNames {
             for subdirectory in subdirectories {
                 if
-                    let url = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: subdirectory),
+                    let url = bundle.url(forResource: name, withExtension: "png", subdirectory: subdirectory),
                     let image = NSImage(contentsOf: url)
                 {
                     return image
@@ -6031,6 +6033,14 @@ struct SettingsView: View {
             }
         }
         return nil
+    }
+
+    private var resourceBundle: Bundle {
+#if SWIFT_PACKAGE
+        return .module
+#else
+        return .main
+#endif
     }
     
     private func syntaxRow(_ syntax: String, _ description: String) -> some View {
@@ -6364,26 +6374,6 @@ private struct AITranslationTest: View {
                 .background(accentColor.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
-    }
-}
-
-// Add a test method to the store
-extension EmailStore {
-    func runTestCommand() throws -> String {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: msgvaultPath)
-        process.arguments = ["stats"]
-        process.standardOutput = pipe
-        process.standardError = pipe
-        
-        process.environment = RuntimePaths.processEnvironmentForUserHome()
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? "No output"
     }
 }
 
