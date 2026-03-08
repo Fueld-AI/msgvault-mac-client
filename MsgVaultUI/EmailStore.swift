@@ -12,7 +12,9 @@ struct EmailMessage: Identifiable, Hashable {
     let snippet: String
     let labels: [String]
     let hasAttachment: Bool
-    
+    let threadID: String?
+    let sizeEstimate: Int
+
     // Parse from msgvault search --json output
     static func parse(from json: [String: Any]) -> EmailMessage? {
         let id: String?
@@ -45,7 +47,12 @@ struct EmailMessage: Identifiable, Hashable {
             (json["has_attachment"] as? Bool ?? false) ||
             (json["has_attachments"] as? Bool ?? false) ||
             ((json["attachment_count"] as? Int ?? 0) > 0)
+        let threadID = json["thread_id"] as? String
+            ?? json["threadId"] as? String
+            ?? json["conversation_id"] as? String
         
+        let sizeEstimate = json["size_estimate"] as? Int ?? 0
+
         return EmailMessage(
             id: id,
             from: displayFrom,
@@ -54,12 +61,14 @@ struct EmailMessage: Identifiable, Hashable {
             date: json["sent_at"] as? String ?? json["date"] as? String ?? json["internal_date"] as? String ?? "",
             snippet: json["snippet"] as? String ?? json["body_preview"] as? String ?? "",
             labels: json["labels"] as? [String] ?? [],
-            hasAttachment: hasAttachment
+            hasAttachment: hasAttachment,
+            threadID: threadID,
+            sizeEstimate: sizeEstimate
         )
     }
 }
 
-struct SenderAggregate: Identifiable {
+struct SenderAggregate: Identifiable, Hashable {
     let id = UUID()
     let name: String
     let email: String
@@ -114,6 +123,25 @@ struct SenderSearchRequest: Equatable {
     let additionalKeywords: String
 }
 
+struct MailActionInsightItem: Identifiable, Hashable {
+    var id: String { senderEmail.lowercased() }
+    let senderName: String
+    let senderEmail: String
+    let totalMessages: Int
+    let unreadMessages: Int
+    let unopenedChains: Int
+    let unreadInLast30Days: Int
+    let messagesWithAttachments: Int
+    let totalAttachmentSizeBytes: Int
+}
+
+struct MailActionInsights {
+    let generatedAt: Date
+    let unsubscribeCandidates: [MailActionInsightItem]
+    let unreadMomentum: [MailActionInsightItem]
+    let attachmentHeavySenders: [MailActionInsightItem]
+}
+
 // MARK: - Email Store
 
 @MainActor
@@ -126,9 +154,14 @@ class EmailStore: ObservableObject {
     @Published var messageDetail: String = ""
     @Published var messageDetailHTML: String?
     @Published var senders: [SenderAggregate] = []
+    @Published var allSenders: [SenderAggregate] = []
+    @Published var isLoadingAllSenders = false
     @Published var senderEmailCache: [String: [EmailMessage]] = [:]
     @Published var isLoadingSenderEmails: Set<String> = []
     @Published var searchForSenderRequest: SenderSearchRequest? = nil
+    @Published var mailActionInsights: MailActionInsights?
+    @Published var isLoadingMailActionInsights = false
+    @Published var mailActionInsightsError: String?
     @Published var isRefreshingEmail = false
     @Published var emailRefreshStatus = "Ready to refresh"
     @Published var emailRefreshError: String?
@@ -149,6 +182,13 @@ class EmailStore: ObservableObject {
         didSet { UserDefaults.standard.set(liveSearchEnabled, forKey: Self.liveSearchEnabledKey) }
     }
     @Published var aiSearchStatus = "AI query translation is disabled."
+    @Published var aiTranslationMessage: String?  // shown in results column when AI fails
+
+    var aiModelReady: Bool {
+        aiSearchEnabled && ollamaReachable &&
+        !ollamaInstalledModels.isEmpty &&
+        ollamaInstalledModels.contains(aiModelName)
+    }
     @Published var aiRuntimeStatus = "Checking AI runtime..."
     @Published var ollamaInstalled = false
     @Published var ollamaReachable = false
@@ -171,6 +211,23 @@ class EmailStore: ObservableObject {
     private static let aiModelNameKey = "search.ai.model"
     private static let liveSearchEnabledKey = "search.live.enabled"
     private static let defaultAIModelName = "qwen3.5:2b"
+    private static let isoDateFormatterFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let isoDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+    private static let fallbackDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
     
     init() {
         let defaults = UserDefaults.standard
@@ -244,17 +301,10 @@ class EmailStore: ObservableObject {
     
     private func runMsgvaultAsync(
         arguments: [String],
-        timeoutSeconds: TimeInterval? = nil,
-        accountEmail: String? = nil
+        timeoutSeconds: TimeInterval? = nil
     ) async throws -> String {
         let path = msgvaultPath
         var args = ["--local"]
-        if let accountEmail {
-            let trimmed = accountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                args += ["--account", trimmed]
-            }
-        }
         args += arguments
         return try await Self.executeCommand(path: path, arguments: args, timeoutSeconds: timeoutSeconds)
     }
@@ -347,35 +397,47 @@ class EmailStore: ObservableObject {
     }
     
     func refreshAIRuntimeStatus() async {
+        // Check if the binary exists (needed for install operations)
         let maybePath = findOllamaBinaryPath()
         ollamaBinaryPath = maybePath
-        
-        guard let ollamaPath = maybePath else {
-            ollamaInstalled = false
-            ollamaReachable = false
-            ollamaInstalledModels = []
-            aiRuntimeStatus = "Ollama not found on this machine."
-            updateAISearchStatus()
-            return
-        }
-        
-        ollamaInstalled = true
-        
+        ollamaInstalled = maybePath != nil
+
+        // Probe the HTTP API directly — confirms the daemon is running
+        // and returns the accurate installed model list in one shot.
         do {
-            let output = try await Self.executeCommand(path: ollamaPath, arguments: ["list"], timeoutSeconds: 8)
-            let models = parseOllamaListModels(from: output)
+            let models = try await fetchOllamaInstalledModels()
             ollamaInstalledModels = models
             ollamaReachable = true
             aiRuntimeStatus = models.isEmpty
-                ? "Ollama is installed and running (no models pulled yet)."
-                : "Ollama is installed and running (\(models.count) model\(models.count == 1 ? "" : "s") available)."
+                ? "Ollama is running (no models pulled yet)."
+                : "Ollama is running · \(models.count) model\(models.count == 1 ? "" : "s") installed."
+            print("[AI Runtime] Models available: \(models.joined(separator: ", "))")
         } catch {
             ollamaReachable = false
             ollamaInstalledModels = []
-            let message = Self.cleanErrorMessage(error.localizedDescription)
-            aiRuntimeStatus = "Ollama found but not reachable: \(message)"
+            if ollamaInstalled {
+                aiRuntimeStatus = "Ollama found but server is not running. Open Ollama.app or run `ollama serve`."
+            } else {
+                aiRuntimeStatus = "Ollama not found. Install from ollama.com to enable AI search."
+            }
+            print("[AI Runtime] Server probe failed: \(error.localizedDescription)")
         }
         updateAISearchStatus()
+    }
+
+    private func fetchOllamaInstalledModels(baseURL: String = "http://localhost:11434") async throws -> [String] {
+        guard let url = URL(string: "\(baseURL)/api/tags") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url, timeoutInterval: 6)
+        request.httpMethod = "GET"
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else {
+            throw URLError(.cannotParseResponse)
+        }
+        return models.compactMap { $0["name"] as? String }.sorted()
     }
     
     @discardableResult
@@ -462,75 +524,248 @@ class EmailStore: ObservableObject {
     func translateNaturalLanguageSearch(_ request: String) async -> AISearchTranslation? {
         let prompt = request.trimmingCharacters(in: .whitespacesAndNewlines)
         guard aiSearchEnabled, !prompt.isEmpty else { return nil }
-        
+
+        aiTranslationMessage = nil
+
         if !ollamaInstalled || !ollamaReachable {
             await refreshAIRuntimeStatus()
             updateAISearchStatus()
         }
-        
-        guard let ollamaPath = findOllamaBinaryPath() else {
-            aiSearchStatus = "AI search is enabled but Ollama was not found. Install Ollama to use local query translation."
+
+        guard ollamaReachable else {
+            let msg = "AI search is unavailable — Ollama server is not running."
+            aiSearchStatus = msg
+            aiTranslationMessage = msg
             return nil
         }
-        
+
         if !ollamaInstalledModels.isEmpty && !ollamaInstalledModels.contains(aiModelName) {
-            aiSearchStatus = "Model \(aiModelName) is not installed. Run `ollama pull \(aiModelName)` first."
+            let msg = "Model \"\(aiModelName)\" is not installed. Go to Settings → AI Setup to pull it."
+            aiSearchStatus = msg
+            aiTranslationMessage = msg
             return nil
         }
-        
+
+        let today = Self.translationDateFormatter.string(from: Date())
+
+        // ── Pass 1: Natural language → structured JSON parameters ────────────
+        //
+        // IMPORTANT PROMPT DESIGN NOTE:
+        // - Use ALL-NULL template so the model starts from null, fills only what's mentioned
+        // - Never use type names ("string", "email") as schema values — models copy them literally
+        // - Use concrete filled examples to show expected output format
+        let currentYear = Int(today.prefix(4)) ?? 2026
+        let lastYear = currentYear - 1
+
+        let pass1System = """
+        Extract email search parameters from the user's request. Output ONLY a JSON object. No markdown, no explanation, no extra text.
+
+        Start from this all-null template and fill ONLY the fields directly mentioned in the request. Leave everything else null:
+        {
+          "keywords": null,
+          "from": null,
+          "to": null,
+          "cc": null,
+          "bcc": null,
+          "subject": null,
+          "label": null,
+          "after": null,
+          "before": null,
+          "newer_than": null,
+          "older_than": null,
+          "larger": null,
+          "smaller": null,
+          "has_attachment": false
+        }
+
+        FIELD RULES:
+        - "from": sender name or email address actually mentioned. If user says "from McKinsey", use "McKinsey". If a full email like "alice@co.com", use that.
+        - "to": recipient name or address actually mentioned.
+        - "subject": subject words actually mentioned. Only fill this if the user specifically says "subject" or "about [topic]".
+        - "keywords": any free-text topic words not covered by other fields.
+        - DO NOT invent values. If not mentioned, the field stays null.
+
+        DATE RULES — choose exactly ONE approach, never mix:
+
+        A) Specific month/year mentioned → use "after" + "before" only (never newer_than/older_than):
+           "August last year" (today is \(today)) → after: "\(lastYear)-08-01", before: "\(lastYear)-09-01"
+           "in March \(currentYear)" → after: "\(currentYear)-03-01", before: "\(currentYear)-04-01"
+           "in \(lastYear)" → after: "\(lastYear)-01-01", before: "\(currentYear)-01-01"
+           "last December" → after: "\(lastYear)-12-01", before: "\(currentYear)-01-01"
+           "last September" → after: "\(lastYear)-09-01", before: "\(lastYear)-10-01"
+           Rule: "before" = first day of the month AFTER the target month. Same year unless month is December.
+
+        B) Vague/relative recency → use "newer_than" or "older_than" only (never after/before):
+           "last week" → newer_than: "7d"
+           "past month" (no specific month) → newer_than: "30d"
+           "recently" → newer_than: "14d"
+
+        EXAMPLES:
+
+        Request: "find me emails from Tony Solon"
+        Output: {"keywords":null,"from":"Tony Solon","to":null,"cc":null,"bcc":null,"subject":null,"label":null,"after":null,"before":null,"newer_than":null,"older_than":null,"larger":null,"smaller":null,"has_attachment":false}
+
+        Request: "emails from McKinsey in August last year"
+        Output: {"keywords":null,"from":"McKinsey","to":null,"cc":null,"bcc":null,"subject":null,"label":null,"after":"\(lastYear)-08-01","before":"\(lastYear)-09-01","newer_than":null,"older_than":null,"larger":null,"smaller":null,"has_attachment":false}
+
+        Request: "invoices from HSBC with attachments"
+        Output: {"keywords":"invoices","from":"HSBC","to":null,"cc":null,"bcc":null,"subject":null,"label":null,"after":null,"before":null,"newer_than":null,"older_than":null,"larger":null,"smaller":null,"has_attachment":true}
+
+        Request: "emails from alice@company.com last week about the budget"
+        Output: {"keywords":"budget","from":"alice@company.com","to":null,"cc":null,"bcc":null,"subject":null,"label":null,"after":null,"before":null,"newer_than":"7d","older_than":null,"larger":null,"smaller":null,"has_attachment":false}
+
+        Request: "show me emails sent to John Smith last month"
+        Output: {"keywords":null,"from":null,"to":"John Smith","cc":null,"bcc":null,"subject":null,"label":null,"after":null,"before":null,"newer_than":"30d","older_than":null,"larger":null,"smaller":null,"has_attachment":false}
+
+        Request: "large attachments sent to the team this year"
+        Output: {"keywords":null,"from":null,"to":null,"cc":null,"bcc":null,"subject":null,"label":null,"after":"\(currentYear)-01-01","before":null,"newer_than":null,"older_than":null,"larger":"1M","smaller":null,"has_attachment":true}
+        """
+
+        print("""
+
+        ╔═══════════════════════════════════════════════╗
+        ║ [AI Pass 1] NL→JSON   model=\(aiModelName)
+        ╚═══════════════════════════════════════════════╝
+        SYSTEM PROMPT:
+        \(pass1System)
+
+        USER MESSAGE:
+        \(prompt)
+        ───────────────────────────────────────────────
+        """)
+
         do {
-            let today = Self.translationDateFormatter.string(from: Date())
-            let translatorPrompt = """
-            You convert natural-language email search requests into strict JSON.
-            Today's date: \(today).
-            Use only these keys:
-            {
-              "keywords": string|null,
-              "from": string|null,
-              "to": string|null,
-              "cc": string|null,
-              "bcc": string|null,
-              "subject": string|null,
-              "label": string|null,
-              "after": string|null,
-              "before": string|null,
-              "newer_than": string|null,
-              "older_than": string|null,
-              "larger": string|null,
-              "smaller": string|null,
-              "has_attachment": boolean
-            }
-            Rules:
-            - Output valid JSON only.
-            - Use null for unknown fields.
-            - Dates must be YYYY-MM-DD.
-            - newer_than/older_than must use d,w,m,y suffixes like 7d.
-            
-            Request: \(prompt)
-            """
-            let output = try await Self.executeCommand(
-                path: ollamaPath,
-                arguments: ["run", aiModelName, translatorPrompt],
-                timeoutSeconds: 25
+            let pass1Raw = try await callOllamaAPI(
+                model: aiModelName,
+                system: pass1System,
+                userMessage: prompt
             )
-            guard let payload = parseTranslationPayload(from: output) else {
-                aiSearchStatus = "AI model ran, but output was not valid structured JSON."
+            print("[AI Pass 1] Raw model content:\n>>>\(pass1Raw)<<<")
+
+            let pass1Cleaned = stripThinkingTags(from: pass1Raw)
+
+            guard let payload = parseTranslationPayload(from: pass1Cleaned) else {
+                print("[AI Pass 1] ⚠️ JSON parse failed. Cleaned:\n\(pass1Cleaned)")
+                let msg = "I couldn't understand that search request — try rephrasing it."
+                aiSearchStatus = msg
+                aiTranslationMessage = msg
                 return nil
             }
-            
-            let translatedQuery = buildTranslatedQuery(from: payload)
-            guard !translatedQuery.isEmpty else {
-                aiSearchStatus = "AI translation returned no usable filters."
+            print("[AI Pass 1] ✅ JSON: \(payload.rawJSON)")
+
+            var draft = buildTranslatedQuery(from: payload)
+            // Deterministic fix: strip relative date tokens if absolute dates are present.
+            // The model can hallucinate both simultaneously; this catches it before Pass 2.
+            draft = resolveAbsoluteRelativeDateConflict(in: draft)
+            print("[AI Pass 1] ✅ Draft query (after conflict resolution): \(draft)")
+
+            guard !draft.isEmpty else {
+                let msg = "Your request didn't produce any search filters — try adding more detail."
+                aiSearchStatus = msg
+                aiTranslationMessage = msg
                 return nil
             }
-            
+
+            // ── Pass 2: Deterministic Swift validation ────────────────────────
+            // LLM-based validation with a 2B model actively corrupts correct
+            // queries by hallucinating operator names from its own prompt text.
+            // All structural rules are enforced here in Swift instead.
+            // A reasoning model (7B+) can be re-enabled as Pass 2 in a future build.
+            draft = applyDeterministicQueryFixes(to: draft)
+            print("[AI Validation] Final query: \(draft)")
+
             aiSearchStatus = "AI query translation active (\(aiModelName))."
-            return AISearchTranslation(query: translatedQuery, rawJSON: payload.rawJSON)
+            aiTranslationMessage = nil
+            return AISearchTranslation(query: draft, rawJSON: payload.rawJSON)
+
         } catch {
-            let message = Self.cleanErrorMessage(error.localizedDescription)
-            aiSearchStatus = "AI query translation failed: \(message)"
+            print("[AI Search] ❌ \(error)")
+            let msg = "AI search failed: \(error.localizedDescription)"
+            aiSearchStatus = msg
+            aiTranslationMessage = msg
             return nil
         }
+    }
+
+    // Call the Ollama REST API directly.
+    // - Reasoning models (deepseek-r1, qwq): thinking is ENABLED — their reasoning chain
+    //   significantly improves extraction quality. We strip <think> tags from the output.
+    // - Hybrid models (qwen3): thinking is disabled via think:false because Qwen3 with
+    //   thinking sends the answer only in message.thinking, leaving content empty.
+    private func callOllamaAPI(
+        model: String,
+        system: String,
+        userMessage: String,
+        baseURL: String = "http://localhost:11434"
+    ) async throws -> String {
+        guard let url = URL(string: "\(baseURL)/api/chat") else {
+            throw URLError(.badURL)
+        }
+
+        // Detect whether this is a model that benefits from thinking being suppressed.
+        // Qwen3/Qwen3.5 hybrid: disabling think avoids empty content field.
+        // DeepSeek-R1 and other dedicated reasoning models: let them think.
+        let modelLower = model.lowercased()
+        let suppressThinking = modelLower.contains("qwen3") || modelLower.contains("qwen3.5")
+        print("[AI API] Model: \(model) — thinking \(suppressThinking ? "suppressed" : "enabled")")
+
+        var body: [String: Any] = [
+            "model": model,
+            "stream": false,
+            "messages": [
+                ["role": "system", "content": system],
+                ["role": "user", "content": userMessage]
+            ],
+            "options": [
+                "temperature": 0.0,
+                "num_predict": 1024    // increased for reasoning models that output more tokens
+            ]
+        ]
+        if suppressThinking {
+            body["think"] = false
+        }
+
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        // Log the full raw response so we can see exactly what the model returned
+        let rawResponseString = String(data: data, encoding: .utf8) ?? "(could not decode)"
+        print("[AI API] Full response JSON:\n\(rawResponseString)")
+
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        guard http.statusCode == 200 else {
+            throw URLError(.badServerResponse, userInfo: [
+                NSLocalizedDescriptionKey: "Ollama returned HTTP \(http.statusCode): \(rawResponseString)"
+            ])
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["message"] as? [String: Any] else {
+            print("[AI API] ⚠️ Could not parse message from response")
+            throw URLError(.cannotParseResponse)
+        }
+
+        let content = (message["content"] as? String) ?? ""
+        let thinking = (message["thinking"] as? String) ?? ""
+
+        print("[AI API] content field: >>>\(content)<<<")
+        print("[AI API] thinking field length: \(thinking.count) chars")
+
+        // Qwen3 thinking models may leave content empty and put everything in thinking.
+        // If content is empty/whitespace, fall back to the thinking field so at minimum
+        // we can debug what the model intended. The caller strips <think> tags.
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !thinking.isEmpty {
+            print("[AI API] ⚠️ content was empty — falling back to thinking field")
+            return thinking
+        }
+
+        return content
     }
     
     private struct TranslationPayload {
@@ -565,6 +800,76 @@ class EmailStore: ObservableObject {
         return nil
     }
     
+    // All structural rules applied deterministically after Pass 1.
+    // This replaces the LLM Pass 2 validator, which a 2B model cannot
+    // perform reliably without hallucinating values from its own prompt.
+    private func applyDeterministicQueryFixes(to query: String) -> String {
+        var q = resolveAbsoluteRelativeDateConflict(in: query)
+        q = removeSpuriousOperatorLiterals(from: q)
+        q = q.trimmingCharacters(in: .whitespacesAndNewlines)
+        return q
+    }
+
+    // Remove any tokens where the operator value is a known placeholder/type literal
+    // that a model might copy from its own prompt (e.g. "from:email", "to:email",
+    // "subject:text", "label:TEXT", "has:attachment" when not explicitly asked).
+    private func removeSpuriousOperatorLiterals(from query: String) -> String {
+        let spurious = [
+            "from:email", "to:email", "cc:email", "bcc:email",
+            "subject:text", "subject:string", "label:TEXT", "label:text",
+            "larger:NM", "smaller:NM", "larger:NK", "smaller:NK"
+        ]
+        var tokens = query.split(separator: " ").map(String.init)
+        let before = tokens
+        tokens = tokens.filter { token in
+            !spurious.contains(token.lowercased())
+        }
+        if tokens != before {
+            print("[AI Validation] Removed spurious literals: \(Set(before).subtracting(Set(tokens)))")
+        }
+        return tokens.joined(separator: " ")
+    }
+
+    // If a query contains both absolute (after:/before:) and relative (newer_than:/older_than:)
+    // date operators, remove the relative ones — absolute is always more specific.
+    private func resolveAbsoluteRelativeDateConflict(in query: String) -> String {
+        let hasAbsolute = query.contains("after:") || query.contains("before:")
+        guard hasAbsolute else { return query }
+
+        let relativePattern = try? NSRegularExpression(
+            pattern: #"(newer_than|older_than):\S+"#,
+            options: .caseInsensitive
+        )
+        let range = NSRange(query.startIndex..., in: query)
+        var cleaned = relativePattern?.stringByReplacingMatches(
+            in: query, range: range, withTemplate: ""
+        ) ?? query
+
+        // Collapse any double-spaces left behind
+        while cleaned.contains("  ") { cleaned = cleaned.replacingOccurrences(of: "  ", with: " ") }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if cleaned != query {
+            print("[AI Conflict Fix] Removed relative date tokens from: \(query)")
+            print("[AI Conflict Fix] Result: \(cleaned)")
+        }
+        return cleaned
+    }
+
+    private func stripThinkingTags(from text: String) -> String {
+        var result = text
+        while let openRange = result.range(of: "<think>", options: .caseInsensitive),
+              let closeRange = result.range(of: "</think>", options: .caseInsensitive),
+              openRange.lowerBound < closeRange.upperBound {
+            result.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+        }
+        // Also strip any stray <think> without closing tag
+        if let openRange = result.range(of: "<think>", options: .caseInsensitive) {
+            result.removeSubrange(openRange.lowerBound...)
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func parseTranslationPayload(from output: String) -> TranslationPayload? {
         var jsonString = extractJSONObjectString(from: output)
         if jsonString == nil {
@@ -584,34 +889,97 @@ class EmailStore: ObservableObject {
     private func buildTranslatedQuery(from payload: TranslationPayload) -> String {
         var parts: [String] = []
         let json = payload.values
-        
-        appendToken(from: json, key: "from", prefix: "from:", into: &parts)
-        appendToken(from: json, key: "to", prefix: "to:", into: &parts)
-        appendToken(from: json, key: "cc", prefix: "cc:", into: &parts)
-        appendToken(from: json, key: "bcc", prefix: "bcc:", into: &parts)
-        appendToken(from: json, key: "subject", prefix: "subject:", into: &parts)
-        appendToken(from: json, key: "label", prefix: "label:", into: &parts)
-        appendToken(from: json, key: "after", prefix: "after:", into: &parts)
-        appendToken(from: json, key: "before", prefix: "before:", into: &parts)
+
+        // Address fields: only use the operator if the value looks like an actual email address.
+        // Company names ("McKinsey"), people names ("John Smith"), and domains without @
+        // get added as free-text keywords so msgvault does a broader fuzzy match.
+        appendAddressToken(from: json, key: "from",  prefix: "from:",  into: &parts)
+        appendAddressToken(from: json, key: "to",    prefix: "to:",    into: &parts)
+        appendAddressToken(from: json, key: "cc",    prefix: "cc:",    into: &parts)
+        appendAddressToken(from: json, key: "bcc",   prefix: "bcc:",   into: &parts)
+
+        appendToken(from: json, key: "subject",    prefix: "subject:",    into: &parts)
+        appendToken(from: json, key: "label",      prefix: "label:",      into: &parts)
+        appendToken(from: json, key: "after",      prefix: "after:",      into: &parts)
+
+        // Deterministic before-date logic:
+        // When after: is the 1st of a month, the correct before: is ALWAYS the 1st
+        // of the next month. The model frequently defaults to 2026-01-01 regardless
+        // of which month after: is — we override whenever it's wrong.
+        let afterValue = (json["after"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let beforeValue = (json["before"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if !afterValue.isEmpty {
+            let correctBefore = inferBeforeDate(from: afterValue)
+            if let correctBefore {
+                // Use the correctly computed next-month boundary.
+                // If the model already gave the right value, no change.
+                // If it gave the wrong value (e.g. always Jan 1), override it.
+                if !beforeValue.isEmpty && beforeValue != correctBefore {
+                    print("[AI Date Fix] Overriding wrong before:\(beforeValue) → before:\(correctBefore) (after:\(afterValue))")
+                }
+                parts.append("before:\(correctBefore)")
+            } else if !beforeValue.isEmpty {
+                // after: is not the 1st of a month — use model's value as-is
+                parts.append("before:\(beforeValue)")
+            }
+        } else if !beforeValue.isEmpty {
+            // No after: at all — use model's before: directly
+            appendToken(from: json, key: "before", prefix: "before:", into: &parts)
+        }
+
         appendToken(from: json, key: "newer_than", prefix: "newer_than:", into: &parts)
-        appendToken(from: json, key: "older_than", prefix: "older_than:", into: &parts)
-        appendToken(from: json, key: "larger", prefix: "larger:", into: &parts)
-        appendToken(from: json, key: "smaller", prefix: "smaller:", into: &parts)
-        
+        appendToken(from: json, key: "older_than",  prefix: "older_than:",  into: &parts)
+        appendToken(from: json, key: "larger",      prefix: "larger:",      into: &parts)
+        appendToken(from: json, key: "smaller",     prefix: "smaller:",     into: &parts)
+
         if let hasAttachment = json["has_attachment"] as? Bool, hasAttachment {
             parts.append("has:attachment")
         }
-        
+
         if let keywords = json["keywords"] as? String {
             let trimmed = keywords.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 parts.append(makeQuotedToken(trimmed))
             }
         }
-        
+
         return parts.joined(separator: " ")
     }
-    
+
+    // Address fields: use operator only for proper email addresses (contains @).
+    // Plain names and company names ("McKinsey", "Alice") become free-text keywords
+    // so msgvault's full-text search finds them in From/To headers broadly.
+    private func appendAddressToken(from json: [String: Any], key: String, prefix: String, into parts: inout [String]) {
+        guard let value = json[key] as? String else { return }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if trimmed.contains("@") {
+            // Proper email address — use the operator for exact match
+            parts.append("\(prefix)\(makeOperatorValue(trimmed))")
+        } else {
+            // Name or company — add as keyword so FTS searches across all header fields
+            parts.append(makeQuotedToken(trimmed))
+            print("[AI Address Fix] '\(trimmed)' is not an email, using as keyword instead of \(prefix)")
+        }
+    }
+
+    // If the model gives after:YYYY-MM-DD with no before:, and the date is the first
+    // of a month, infer before: as the first of the *next* month — closing the range.
+    private func inferBeforeDate(from afterDate: String) -> String? {
+        let parts = afterDate.split(separator: "-")
+        guard parts.count == 3,
+              let year  = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day   = Int(parts[2]),
+              day == 1 else { return nil }
+
+        let nextMonth = month == 12 ? 1  : month + 1
+        let nextYear  = month == 12 ? year + 1 : year
+        return String(format: "%04d-%02d-01", nextYear, nextMonth)
+    }
+
     private func appendToken(from json: [String: Any], key: String, prefix: String, into parts: inout [String]) {
         guard let value = json[key] as? String else { return }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -663,8 +1031,7 @@ class EmailStore: ObservableObject {
     
     func search(
         query: String,
-        localFilter: SearchLocalFilter = SearchLocalFilter(),
-        accountEmail: String? = nil
+        localFilter: SearchLocalFilter = SearchLocalFilter()
     ) async {
         guard !query.isEmpty else {
             searchResults = []
@@ -683,8 +1050,7 @@ class EmailStore: ObservableObject {
         for candidate in queryCandidates {
             do {
                 let output = try await runMsgvaultAsync(
-                    arguments: ["search", candidate, "--json", "-n", "100"],
-                    accountEmail: accountEmail
+                    arguments: ["search", candidate, "--json", "-n", "100"]
                 )
                 let messages = parseSearchResults(output)
                 for message in messages where seenMessageIDs.insert(message.id).inserted {
@@ -694,8 +1060,7 @@ class EmailStore: ObservableObject {
                 if let fallbackQuery = fallbackQueryForSpecialCharacters(query: candidate, error: error) {
                     do {
                         let output = try await runMsgvaultAsync(
-                            arguments: ["search", fallbackQuery, "--json", "-n", "100"],
-                            accountEmail: accountEmail
+                            arguments: ["search", fallbackQuery, "--json", "-n", "100"]
                         )
                         let messages = parseSearchResults(output)
                         for message in messages where seenMessageIDs.insert(message.id).inserted {
@@ -723,6 +1088,53 @@ class EmailStore: ObservableObject {
         }
         
         isLoading = false
+    }
+
+    func searchRawMessages(
+        query: String,
+        limit: Int = 100
+    ) async throws -> [EmailMessage] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return [] }
+
+        let queryCandidates = buildSearchQueryCandidates(from: trimmedQuery)
+        var mergedMessages: [EmailMessage] = []
+        var seenMessageIDs = Set<String>()
+        var lastError: Error?
+
+        for candidate in queryCandidates {
+            do {
+                let output = try await runMsgvaultAsync(
+                    arguments: ["search", candidate, "--json", "-n", "\(limit)"]
+                )
+                let messages = parseSearchResults(output)
+                for message in messages where seenMessageIDs.insert(message.id).inserted {
+                    mergedMessages.append(message)
+                }
+            } catch {
+                if let fallbackQuery = fallbackQueryForSpecialCharacters(query: candidate, error: error) {
+                    do {
+                        let output = try await runMsgvaultAsync(
+                            arguments: ["search", fallbackQuery, "--json", "-n", "\(limit)"]
+                        )
+                        let messages = parseSearchResults(output)
+                        for message in messages where seenMessageIDs.insert(message.id).inserted {
+                            mergedMessages.append(message)
+                        }
+                    } catch {
+                        lastError = error
+                    }
+                } else {
+                    lastError = error
+                }
+            }
+        }
+
+        if mergedMessages.isEmpty, let lastError {
+            throw lastError
+        }
+
+        return mergedMessages
     }
     
     // MARK: - Stats
@@ -829,10 +1241,27 @@ class EmailStore: ObservableObject {
         do {
             let output = try await runMsgvaultAsync(arguments: ["list-senders", "--json", "-n", "50"])
             senders = parseSenders(output)
+            // Keep top-senders fast by default; full sender search is loaded lazily on demand.
+            allSenders = []
         } catch {
             errorMessage = "Failed to load senders: \(error.localizedDescription)"
         }
         isLoading = false
+    }
+
+    func loadAllSendersIfNeeded(forceRefresh: Bool = false) async {
+        guard !isLoadingAllSenders else { return }
+        guard forceRefresh || allSenders.isEmpty else { return }
+
+        isLoadingAllSenders = true
+        defer { isLoadingAllSenders = false }
+
+        do {
+            let output = try await runMsgvaultAsync(arguments: ["list-senders", "--json"])
+            allSenders = parseSenders(output)
+        } catch {
+            errorMessage = "Failed to load full sender list: \(error.localizedDescription)"
+        }
     }
     
     func loadEmailsForSender(_ email: String) async {
@@ -850,6 +1279,123 @@ class EmailStore: ObservableObject {
                 senderEmailCache[email] = []
             }
         }
+    }
+
+    func loadMailActionInsights(toAccount: String = "") async {
+        guard !isLoadingMailActionInsights else { return }
+        isLoadingMailActionInsights = true
+        mailActionInsightsError = nil
+        defer { isLoadingMailActionInsights = false }
+
+        do {
+            // Keep this work bounded so we do not fire too many automatic searches.
+            let senderSampleLimit = 14
+            let senderOutput = try await runMsgvaultAsync(arguments: ["list-senders", "--json", "-n", "\(senderSampleLimit)"])
+            let topSenders = parseSenders(senderOutput)
+
+            let accountClause = toAccount.trimmingCharacters(in: .whitespacesAndNewlines)
+            let accountSuffix = accountClause.isEmpty ? "" : " to:\(makeOperatorValue(accountClause))"
+
+            var bySenderEmail: [String: MailActionInsightItem] = [:]
+
+            for sender in topSenders {
+                let normalizedSenderEmail = normalizedSenderFilterValue(sender.email)
+                guard !normalizedSenderEmail.isEmpty else { continue }
+
+                do {
+                    async let unreadAllTask = mailActionSearchMessages(
+                        senderEmail: normalizedSenderEmail,
+                        filters: "label:UNREAD",
+                        limit: 180
+                    )
+                    async let unreadRecentTask = mailActionSearchMessages(
+                        senderEmail: normalizedSenderEmail,
+                        filters: "label:UNREAD newer_than:30d",
+                        limit: 120
+                    )
+                    async let attachmentsTask = mailActionSearchMessages(
+                        senderEmail: normalizedSenderEmail,
+                        filters: "has:attachment\(accountSuffix)",
+                        limit: 160
+                    )
+
+                    let unreadMessages = try await unreadAllTask
+                    let unreadRecentMessages = try await unreadRecentTask
+                    let attachmentMessages = try await attachmentsTask
+                    let unreadChains = Set(unreadMessages.map { chainKey(for: $0) }).count
+                    let totalMessages = max(sender.count, unreadMessages.count, attachmentMessages.count)
+                    let totalAttachmentSizeBytes = attachmentMessages.reduce(0) { $0 + $1.sizeEstimate }
+
+                    let item = MailActionInsightItem(
+                        senderName: sender.name,
+                        senderEmail: normalizedSenderEmail,
+                        totalMessages: totalMessages,
+                        unreadMessages: unreadMessages.count,
+                        unopenedChains: unreadChains,
+                        unreadInLast30Days: unreadRecentMessages.count,
+                        messagesWithAttachments: attachmentMessages.count,
+                        totalAttachmentSizeBytes: totalAttachmentSizeBytes
+                    )
+                    bySenderEmail[item.id] = item
+                } catch {
+                    // Skip individual sender failures so one bad sender doesn't hide all insights.
+                    continue
+                }
+            }
+
+            let allInsights = bySenderEmail.values.filter { $0.totalMessages >= 4 }
+
+            let unsubscribeCandidates = allInsights
+                .filter {
+                    let unreadRate = Double($0.unreadMessages) / Double(max($0.totalMessages, 1))
+                    return $0.unopenedChains >= 3 || ($0.unreadMessages >= 6 && unreadRate >= 0.55)
+                }
+                .sorted {
+                    if $0.unopenedChains != $1.unopenedChains { return $0.unopenedChains > $1.unopenedChains }
+                    if $0.unreadMessages != $1.unreadMessages { return $0.unreadMessages > $1.unreadMessages }
+                    return $0.totalMessages > $1.totalMessages
+                }
+
+            let unreadMomentum = allInsights
+                .filter { $0.unreadInLast30Days >= 2 }
+                .sorted {
+                    if $0.unreadInLast30Days != $1.unreadInLast30Days { return $0.unreadInLast30Days > $1.unreadInLast30Days }
+                    return $0.unreadMessages > $1.unreadMessages
+                }
+
+            let attachmentHeavySenders = allInsights
+                .filter { $0.messagesWithAttachments >= 2 }
+                .sorted {
+                    if $0.totalAttachmentSizeBytes != $1.totalAttachmentSizeBytes {
+                        return $0.totalAttachmentSizeBytes > $1.totalAttachmentSizeBytes
+                    }
+                    return $0.messagesWithAttachments > $1.messagesWithAttachments
+                }
+
+            mailActionInsights = MailActionInsights(
+                generatedAt: Date(),
+                unsubscribeCandidates: Array(unsubscribeCandidates.prefix(8)),
+                unreadMomentum: Array(unreadMomentum.prefix(8)),
+                attachmentHeavySenders: Array(attachmentHeavySenders.prefix(8))
+            )
+        } catch {
+            let rawMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            mailActionInsightsError = Self.cleanErrorMessage(rawMessage)
+        }
+    }
+
+    private func mailActionSearchMessages(
+        senderEmail: String,
+        filters: String,
+        limit: Int
+    ) async throws -> [EmailMessage] {
+        let senderToken = "from:\(makeOperatorValue(senderEmail))"
+        let trimmedFilters = filters.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = trimmedFilters.isEmpty ? senderToken : "\(senderToken) \(trimmedFilters)"
+        let output = try await runMsgvaultAsync(
+            arguments: ["search", query, "--json", "-n", "\(limit)"]
+        )
+        return parseSearchResults(output)
     }
     
     // MARK: - Message Detail
@@ -960,7 +1506,9 @@ class EmailStore: ObservableObject {
                 date: extractDatePrefix(from: trimmed) ?? "",
                 snippet: trimmed,
                 labels: [],
-                hasAttachment: false
+                hasAttachment: false,
+                threadID: nil,
+                sizeEstimate: 0
             ))
         }
         return messages
@@ -1183,6 +1731,55 @@ class EmailStore: ObservableObject {
         let formattedNumber = formatter.string(from: NSNumber(value: value)) ?? raw
         return unit.isEmpty ? formattedNumber : "\(formattedNumber) \(unit)"
     }
+
+    private func isUnreadMessage(_ message: EmailMessage) -> Bool {
+        message.labels.contains { label in
+            label.localizedCaseInsensitiveContains("unread")
+        }
+    }
+
+    private func parseMessageDate(_ value: String) -> Date? {
+        if let date = Self.isoDateFormatterFractional.date(from: value) { return date }
+        if let date = Self.isoDateFormatter.date(from: value) { return date }
+        if let date = Self.fallbackDateFormatter.date(from: value) { return date }
+        return nil
+    }
+
+    private func chainKey(for message: EmailMessage) -> String {
+        if let thread = message.threadID?.trimmingCharacters(in: .whitespacesAndNewlines), !thread.isEmpty {
+            return "thread:\(thread)"
+        }
+        var normalized = message.subject.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        while normalized.hasPrefix("re:") || normalized.hasPrefix("fw:") || normalized.hasPrefix("fwd:") {
+            if let separator = normalized.firstIndex(of: ":") {
+                normalized = normalized[normalized.index(after: separator)...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                break
+            }
+        }
+        return normalized.isEmpty ? "msg:\(message.id)" : "subject:\(normalized)"
+    }
+
+    private func normalizedSenderFilterValue(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        if let start = trimmed.firstIndex(of: "<"),
+           let end = trimmed[start...].firstIndex(of: ">"),
+           start < end {
+            let extracted = String(trimmed[trimmed.index(after: start)..<end])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if extracted.contains("@") {
+                return extracted
+            }
+        }
+
+        if trimmed.contains("@") {
+            return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: ",;()[]<>\"' "))
+        }
+        return trimmed
+    }
     
     private func fallbackQueryForSpecialCharacters(query: String, error: Error) -> String? {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -1371,7 +1968,7 @@ enum MsgVaultError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .commandFailed(let msg): return msg
-        case .commandTimedOut(let seconds): return "Timed out waiting for OAuth after \(seconds)s"
+        case .commandTimedOut(let seconds): return "Command timed out after \(seconds)s"
         case .notFound: return "msgvault binary not found"
         }
     }

@@ -10,7 +10,7 @@ struct ContentView: View {
     
     enum SidebarTab: String, CaseIterable {
         case search = "Search"
-        case senders = "Top Senders"
+        case senders = "Sender Search"
         case stats = "Stats"
         case accounts = "Accounts"
         case settings = "Settings"
@@ -184,8 +184,8 @@ struct SearchView: View {
     @State private var debounceTask: Task<Void, Never>?
     @State private var isTranslatingQuery = false
     @State private var showFilters = false
-    @State private var showTagPicker = false
-    @State private var tagSearchText = ""
+    @State private var showLabelPickerPopover = false
+    @State private var labelPickerSearchText = ""
     @State private var sortOption: SearchSortOption = .defaultOrder
     @StateObject private var speechInput = SpeechInputManager()
     
@@ -341,7 +341,6 @@ struct SearchView: View {
     private struct SearchPlan {
         let query: String
         let localFilter: SearchLocalFilter
-        let accountEmail: String?
     }
     
     private static let recentQueriesKey = "search.recent.queries"
@@ -359,6 +358,10 @@ struct SearchView: View {
         var parts: [String] = []
         var localFilter = SearchLocalFilter()
         let accountFilter = selectedAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !accountFilter.isEmpty {
+            // Account selection is treated as "recipient mailbox" filtering.
+            parts.append(makeOperatorToken(prefix: "to:", value: accountFilter))
+        }
         let fromFilter = filterFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         if !fromFilter.isEmpty {
             localFilter.fromContains = fromFilter
@@ -433,8 +436,7 @@ struct SearchView: View {
         
         return SearchPlan(
             query: parts.joined(separator: " "),
-            localFilter: localFilter,
-            accountEmail: accountFilter.isEmpty ? nil : accountFilter
+            localFilter: localFilter
         )
     }
     
@@ -442,9 +444,26 @@ struct SearchView: View {
         debounceTask?.cancel()
         Task { await runSearch(userInitiated: true) }
     }
+
+    private func consumePendingSenderSearchRequestIfNeeded() {
+        guard let req = store.searchForSenderRequest else { return }
+        store.searchForSenderRequest = nil
+        clearAll()
+        filterFrom = req.senderEmail
+        let kw = req.additionalKeywords.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !kw.isEmpty { searchKeywords = kw }
+        showFilters = true
+        performSearch()
+    }
+    
+    private var isAISearchActive: Bool {
+        aiAssistEnabled && store.aiModelReady
+    }
     
     private func scheduleDebouncedSearch() {
-        guard store.liveSearchEnabled else { return }
+        // AI mode is intentional/confirm-first: do not auto-run while typing.
+        // Users explicitly submit with Enter or the Search button.
+        guard store.liveSearchEnabled, !isAISearchActive else { return }
         let plan = buildSearchPlan()
         guard !plan.query.isEmpty else { return }
         
@@ -459,9 +478,10 @@ struct SearchView: View {
     private func runSearch(userInitiated: Bool) async {
         var plan = buildSearchPlan()
         guard !plan.query.isEmpty else { return }
-        
+
         translatedQueryPreview = nil
         translatedQueryJSONPreview = nil
+        store.aiTranslationMessage = nil
         
         if shouldUseAITranslation {
             isTranslatingQuery = true
@@ -470,21 +490,25 @@ struct SearchView: View {
                 translatedQueryJSONPreview = translated.rawJSON
                 plan = SearchPlan(
                     query: translated.query,
-                    localFilter: SearchLocalFilter(),
-                    accountEmail: plan.accountEmail
+                    localFilter: SearchLocalFilter()
                 )
+            } else {
+                // AI translation failed or returned empty — do NOT fall through to raw keyword
+                // search since that gives misleading unrelated results. Surface the error.
+                isTranslatingQuery = false
+                return
             }
             isTranslatingQuery = false
         }
-        
-        await store.search(query: plan.query, localFilter: plan.localFilter, accountEmail: plan.accountEmail)
+
+        await store.search(query: plan.query, localFilter: plan.localFilter)
         if userInitiated {
             recordRecentQuery(searchKeywords.isEmpty ? plan.query : searchKeywords)
         }
     }
     
     private var shouldUseAITranslation: Bool {
-        guard aiAssistEnabled, store.aiSearchEnabled else { return false }
+        guard isAISearchActive else { return false }
         guard searchScope == .everything else { return false }
         
         let keywords = searchKeywords.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -720,43 +744,51 @@ struct SearchView: View {
 
                     // Label picker button
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showTagPicker.toggle()
-                        }
-                        if showTagPicker && store.availableLabels.isEmpty {
+                        if store.availableLabels.isEmpty {
                             Task { await store.fetchLabels() }
                         }
+                        showLabelPickerPopover.toggle()
                     } label: {
                         HStack(spacing: 4) {
                             Text(filterLabel.isEmpty ? "Label" : filterLabel)
                                 .font(.caption.weight(.semibold))
                                 .lineLimit(1)
-                            Image(systemName: showTagPicker ? "chevron.up" : "chevron.down")
+                            Image(systemName: showLabelPickerPopover ? "chevron.up" : "chevron.down")
                                 .font(.system(size: 8, weight: .bold))
                         }
-                        .foregroundStyle((filterLabel.isEmpty && !showTagPicker) ? .primary : accentColor)
+                        .foregroundStyle((filterLabel.isEmpty && !showLabelPickerPopover) ? .primary : accentColor)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill((filterLabel.isEmpty && !showTagPicker)
+                                .fill((filterLabel.isEmpty && !showLabelPickerPopover)
                                       ? Color(NSColor.controlBackgroundColor)
                                       : accentColor.opacity(0.12))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .strokeBorder((filterLabel.isEmpty && !showTagPicker)
+                                .strokeBorder((filterLabel.isEmpty && !showLabelPickerPopover)
                                               ? Color.primary.opacity(0.08)
                                               : accentColor.opacity(0.30), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
+                    .popover(isPresented: $showLabelPickerPopover, arrowEdge: .bottom) {
+                        LabelPickerPopoverContent(
+                            selectedLabel: $filterLabel,
+                            searchText: $labelPickerSearchText,
+                            onSelect: { _ in
+                                labelPickerSearchText = ""
+                                showLabelPickerPopover = false
+                                performSearch()
+                            }
+                        )
+                    }
                     .help("Filter by Gmail label")
 
                     if !filterLabel.isEmpty {
                         Button {
                             filterLabel = ""
-                            withAnimation(.easeInOut(duration: 0.15)) { showTagPicker = false }
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 11))
@@ -769,59 +801,46 @@ struct SearchView: View {
                     Spacer()
 
                     // AI toggle
+                    let aiActive = aiAssistEnabled && store.aiModelReady
                     Button {
-                        aiAssistEnabled.toggle()
+                        if store.aiModelReady {
+                            aiAssistEnabled.toggle()
+                        }
                     } label: {
                         Label("AI", systemImage: "sparkles")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(aiAssistEnabled && store.aiSearchEnabled ? .white : .secondary)
+                            .foregroundStyle(aiActive ? .white : store.aiModelReady ? .primary : .secondary)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(
                                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(aiAssistEnabled && store.aiSearchEnabled
-                                          ? LinearGradient(colors: [accentColor.opacity(0.9), accentColor.opacity(0.75)],
-                                                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                                          : LinearGradient(colors: [Color(NSColor.controlBackgroundColor), Color(NSColor.controlBackgroundColor)],
-                                                           startPoint: .topLeading, endPoint: .bottomTrailing))
+                                    .fill(aiActive
+                                          ? LinearGradient(
+                                              colors: [Color.purple.opacity(0.85), Color.indigo.opacity(0.75)],
+                                              startPoint: .topLeading, endPoint: .bottomTrailing)
+                                          : LinearGradient(
+                                              colors: [Color(NSColor.controlBackgroundColor), Color(NSColor.controlBackgroundColor)],
+                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .strokeBorder(aiAssistEnabled && store.aiSearchEnabled
-                                                  ? accentColor.opacity(0.30)
-                                                  : Color.primary.opacity(0.08), lineWidth: 1)
+                                    .strokeBorder(
+                                        aiActive ? Color.purple.opacity(0.50) : Color.primary.opacity(0.08),
+                                        lineWidth: aiActive ? 1.5 : 1
+                                    )
+                            )
+                            .shadow(
+                                color: aiActive ? Color.purple.opacity(0.45) : .clear,
+                                radius: 6, x: 0, y: 0
                             )
                     }
                     .buttonStyle(.plain)
-                    .disabled(!store.aiSearchEnabled)
-                    .help(store.aiSearchEnabled ? "Translate natural-language queries to msgvault syntax" : "Enable AI in Settings > AI")
-
-                    // Live toggle
-                    Button {
-                        store.liveSearchEnabled.toggle()
-                    } label: {
-                        Label("Live", systemImage: "bolt.horizontal.circle")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(store.liveSearchEnabled ? .white : .secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(store.liveSearchEnabled
-                                          ? LinearGradient(colors: [accentColor.opacity(0.9), accentColor.opacity(0.75)],
-                                                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                                          : LinearGradient(colors: [Color(NSColor.controlBackgroundColor), Color(NSColor.controlBackgroundColor)],
-                                                           startPoint: .topLeading, endPoint: .bottomTrailing))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .strokeBorder(store.liveSearchEnabled
-                                                  ? accentColor.opacity(0.30)
-                                                  : Color.primary.opacity(0.08), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help("Automatically run search as you type")
+                    .disabled(!store.aiModelReady)
+                    .help(
+                        store.aiModelReady
+                            ? (aiActive ? "AI search is ON — queries are translated to operators" : "Enable AI-powered natural language search")
+                            : "No AI model ready. Go to Settings → AI Setup to install a model."
+                    )
 
                     // Recent searches menu
                     Menu {
@@ -916,107 +935,6 @@ struct SearchView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 6)
 
-                // Label picker panel
-                if showTagPicker {
-                    VStack(spacing: 0) {
-                        // Prominent search bar at the top
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            TextField("Filter labels…", text: $tagSearchText)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 14, weight: .medium))
-                            if !tagSearchText.isEmpty {
-                                Button { tagSearchText = "" } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(Color(NSColor.textBackgroundColor))
-
-                        Divider()
-
-                        if store.isLoadingLabels {
-                            HStack(spacing: 6) {
-                                ProgressView().scaleEffect(0.75)
-                                Text("Loading labels…")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 24)
-                        } else {
-                            let filteredLabels = tagSearchText.isEmpty
-                                ? store.availableLabels
-                                : store.availableLabels.filter {
-                                    $0.key.localizedCaseInsensitiveContains(tagSearchText)
-                                }
-
-                            if filteredLabels.isEmpty {
-                                Text("No labels match \"\(tagSearchText)\"")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 24)
-                            } else {
-                                ScrollView {
-                                    LazyVStack(spacing: 0) {
-                                        ForEach(filteredLabels) { label in
-                                            Button {
-                                                filterLabel = label.key
-                                                tagSearchText = ""
-                                                withAnimation(.easeInOut(duration: 0.15)) {
-                                                    showTagPicker = false
-                                                }
-                                                performSearch()
-                                            } label: {
-                                                HStack {
-                                                    Text(label.key)
-                                                        .font(.system(size: 11))
-                                                        .foregroundStyle(filterLabel == label.key ? accentColor : .primary)
-                                                    Spacer()
-                                                    Text("\(label.count)")
-                                                        .font(.system(size: 10))
-                                                        .foregroundStyle(.secondary)
-                                                        .padding(.horizontal, 5)
-                                                        .padding(.vertical, 2)
-                                                        .background(Color.primary.opacity(0.06))
-                                                        .clipShape(Capsule())
-                                                }
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 6)
-                                                .background(filterLabel == label.key
-                                                            ? accentColor.opacity(0.08)
-                                                            : Color.clear)
-                                                .contentShape(Rectangle())
-                                            }
-                                            .buttonStyle(.plain)
-
-                                            Divider().opacity(0.4).padding(.leading, 12)
-                                        }
-                                    }
-                                }
-                                .frame(maxHeight: 220)
-                            }
-                        }
-                    }
-                    .background(Color(NSColor.windowBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
-                    )
-                    .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 3)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 6)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                }
                 
                 HStack(spacing: 12) {
                     HStack(spacing: 10) {
@@ -1028,6 +946,45 @@ struct SearchView: View {
                             .textFieldStyle(.plain)
                             .font(.body)
                             .onSubmit { performSearch() }
+                        
+                        if !isAISearchActive {
+                            Button {
+                                store.liveSearchEnabled.toggle()
+                            } label: {
+                                Label("Live", systemImage: "bolt.horizontal.circle.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(store.liveSearchEnabled ? .white : .secondary)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(
+                                                store.liveSearchEnabled
+                                                    ? LinearGradient(
+                                                        colors: [accentColor.opacity(0.9), accentColor.opacity(0.75)],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    )
+                                                    : LinearGradient(
+                                                        colors: [Color(NSColor.controlBackgroundColor), Color(NSColor.controlBackgroundColor)],
+                                                        startPoint: .topLeading,
+                                                        endPoint: .bottomTrailing
+                                                    )
+                                            )
+                                    )
+                                    .overlay(
+                                        Capsule(style: .continuous)
+                                            .strokeBorder(
+                                                store.liveSearchEnabled
+                                                    ? accentColor.opacity(0.35)
+                                                    : Color.primary.opacity(0.12),
+                                                lineWidth: 1
+                                            )
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Automatically run search as you type")
+                        }
                         
                         Button {
                             speechInput.toggleListening { transcript in
@@ -1057,36 +1014,53 @@ struct SearchView: View {
                     .padding(.vertical, 11)
                     .background(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color(NSColor.controlBackgroundColor))
+                            .fill(isAISearchActive
+                                  ? Color.purple.opacity(0.04)
+                                  : Color(NSColor.controlBackgroundColor))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .strokeBorder(
-                                searchKeywords.isEmpty ? Color.primary.opacity(0.12) : accentColor.opacity(0.50),
-                                lineWidth: 1
+                                isAISearchActive
+                                    ? Color.purple.opacity(0.55)
+                                    : (searchKeywords.isEmpty ? Color.primary.opacity(0.12) : accentColor.opacity(0.50)),
+                                lineWidth: isAISearchActive ? 1.5 : 1
                             )
                     )
-                    .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 3)
+                    .shadow(
+                        color: isAISearchActive
+                            ? Color.purple.opacity(0.22)
+                            : .black.opacity(0.06),
+                        radius: isAISearchActive ? 10 : 8,
+                        x: 0, y: 3
+                    )
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
                 
-                if isTranslatingQuery || translatedQueryPreview != nil || speechInput.errorMessage != nil {
+                if isTranslatingQuery || translatedQueryPreview != nil || store.aiTranslationMessage != nil || speechInput.errorMessage != nil {
                     HStack(spacing: 8) {
                         if isTranslatingQuery {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Translating query with local AI...")
+                            ProgressView().controlSize(.small)
+                            Text("AI translating…")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else if let translatedQueryPreview {
-                            Label("AI query:", systemImage: "sparkles")
+                            Image(systemName: "sparkles")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(accentColor)
+                                .foregroundStyle(.purple)
                             Text(translatedQueryPreview)
                                 .font(.caption.monospaced())
                                 .lineLimit(1)
                                 .foregroundStyle(.secondary)
+                        } else if let aiMsg = store.aiTranslationMessage {
+                            Image(systemName: "exclamationmark.circle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            Text(aiMsg)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .lineLimit(2)
                         } else if let speechError = speechInput.errorMessage {
                             Label(speechError, systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption)
@@ -1116,7 +1090,7 @@ struct SearchView: View {
                         
                         HStack(spacing: 12) {
                             FilterField(label: "Subject", placeholder: "meeting notes", text: $filterSubject, icon: "text.alignleft")
-                            FilterField(label: "Label", placeholder: "INBOX", text: $filterLabel, icon: "tag")
+                            FilterFieldLabelPicker(selectedLabel: $filterLabel, onSelect: { scheduleDebouncedSearch() })
                         }
                         
                         HStack(spacing: 12) {
@@ -1142,27 +1116,10 @@ struct SearchView: View {
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         
-                        HStack(alignment: .top, spacing: 14) {
-                            DateFilterField(label: "After", date: $filterAfterDate, icon: "calendar")
-                            DateRangeConnector()
-                            DateFilterField(label: "Before", date: $filterBeforeDate, icon: "calendar.badge.clock")
-                            AttachmentFilterField(isOn: $filterHasAttachment)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [accentColor.opacity(0.10), accentColor.opacity(0.03)],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .strokeBorder(accentColor.opacity(0.22), lineWidth: 1)
+                        CompactDateAttachmentBar(
+                            afterDate: $filterAfterDate,
+                            beforeDate: $filterBeforeDate,
+                            hasAttachment: $filterHasAttachment
                         )
                         
                         if hasActiveFilters {
@@ -1191,14 +1148,45 @@ struct SearchView: View {
             HStack(spacing: 0) {
                 // Message list
                 VStack(spacing: 0) {
-                    if store.isLoading {
+                    if store.isLoading || isTranslatingQuery {
                         Spacer()
-                        ProgressView("Searching...")
+                        if isTranslatingQuery {
+                            VStack(spacing: 10) {
+                                ProgressView()
+                                Text("Translating with AI…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("Pass 1: understanding your request")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
                             .frame(maxWidth: .infinity)
+                        } else {
+                            ProgressView("Searching...")
+                                .frame(maxWidth: .infinity)
+                        }
                         Spacer()
                     } else if displayedResults.isEmpty {
                         Spacer()
-                        if let error = store.errorMessage {
+                        if let aiMsg = store.aiTranslationMessage {
+                            VStack(spacing: 14) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 36))
+                                    .foregroundStyle(.purple.opacity(0.7))
+                                Text("AI search couldn't translate that")
+                                    .font(.headline)
+                                Text(aiMsg)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: 300)
+                                Text("Try rephrasing, or use the filter panel for structured searches.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: 260)
+                            }
+                        } else if let error = store.errorMessage {
                             VStack(spacing: 12) {
                                 Image(systemName: "exclamationmark.triangle")
                                     .font(.system(size: 36))
@@ -1220,7 +1208,9 @@ struct SearchView: View {
                                     .font(.headline)
                                     .foregroundStyle(.secondary)
                                 if buildQuery().isEmpty {
-                                    Text("Type keywords above, or use filters to narrow results by sender, subject, date, and more.")
+                                    Text(shouldUseAITranslation
+                                         ? "Describe what you're looking for in plain English, then press Enter."
+                                         : "Type keywords above, or use filters to narrow results by sender, subject, date, and more.")
                                         .font(.caption)
                                         .foregroundStyle(.tertiary)
                                         .multilineTextAlignment(.center)
@@ -1322,6 +1312,7 @@ struct SearchView: View {
             if store.accounts.isEmpty {
                 await store.loadAccounts()
             }
+            consumePendingSenderSearchRequestIfNeeded()
         }
         .onChange(of: searchKeywords) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: searchScope) { _, _ in scheduleDebouncedSearch() }
@@ -1337,15 +1328,8 @@ struct SearchView: View {
         .onChange(of: filterHasAttachment) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: filterLabel) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: selectedAccountEmail) { _, _ in scheduleDebouncedSearch() }
-        .onChange(of: store.searchForSenderRequest) { _, request in
-            guard let req = request else { return }
-            store.searchForSenderRequest = nil
-            clearAll()
-            filterFrom = req.senderEmail
-            let kw = req.additionalKeywords.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !kw.isEmpty { searchKeywords = kw }
-            showFilters = true
-            performSearch()
+        .onChange(of: store.searchForSenderRequest) { _, _ in
+            consumePendingSenderSearchRequestIfNeeded()
         }
         .onDisappear {
             debounceTask?.cancel()
@@ -2058,6 +2042,385 @@ private struct AttachmentFilterField: View {
     }
 }
 
+// MARK: - Label Picker Popover
+
+/// Accent-coloured floating label picker, shared by toolbar + filter panels.
+private struct LabelPickerPopoverContent: View {
+    @Binding var selectedLabel: String
+    @Binding var searchText: String
+    var onSelect: (String) -> Void
+
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+    @Environment(\.colorScheme) private var colorScheme
+
+    private let visibleRows = 10
+    private let rowHeight: CGFloat = 34
+
+    private var filteredLabels: [LabelInfo] {
+        searchText.isEmpty
+            ? store.availableLabels
+            : store.availableLabels.filter { $0.key.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    private var listViewportHeight: CGFloat {
+        CGFloat(visibleRows) * rowHeight + 8
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.78))
+                TextField("", text: $searchText, prompt: Text("Filter labels…").foregroundStyle(.white.opacity(0.70)))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white)
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.80))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(colorScheme == .dark ? 0.18 : 0.14))
+
+            Divider().overlay(Color.white.opacity(0.18))
+
+            if store.isLoadingLabels {
+                ProgressView()
+                    .tint(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(height: listViewportHeight)
+            } else if filteredLabels.isEmpty {
+                Text(searchText.isEmpty ? "No labels found" : "No match for \"\(searchText)\"")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.78))
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(height: listViewportHeight)
+                    .multilineTextAlignment(.center)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(filteredLabels) { label in
+                            Button {
+                                selectedLabel = label.key
+                                onSelect(label.key)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: selectedLabel == label.key ? "checkmark" : "tag")
+                                        .font(.system(size: 12, weight: selectedLabel == label.key ? .bold : .regular))
+                                        .foregroundStyle(.white.opacity(selectedLabel == label.key ? 1.0 : 0.68))
+                                        .frame(width: 16)
+                                    Text(label.key)
+                                        .font(.system(size: 14, weight: selectedLabel == label.key ? .semibold : .medium))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 12)
+                                    Text(label.count.formatted())
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.88))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Color.black.opacity(0.22))
+                                        .clipShape(Capsule())
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: rowHeight)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(selectedLabel == label.key ? .white.opacity(0.22) : Color.black.opacity(0.16))
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                }
+                .frame(height: listViewportHeight)
+            }
+        }
+        .frame(width: 344)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [accentColor.opacity(0.96), accentColor.opacity(0.84)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 16, x: 0, y: 8)
+    }
+}
+
+/// Drop-in replacement for FilterField that opens the label picker popover.
+private struct FilterFieldLabelPicker: View {
+    @Binding var selectedLabel: String
+    var onSelect: (() -> Void)? = nil
+
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.appAccentColor) private var accentColor
+    @State private var showPicker = false
+    @State private var searchText = ""
+
+    private var isActive: Bool { !selectedLabel.isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Label")
+                .font(.caption)
+                .foregroundStyle(isActive ? accentColor : Color.secondary)
+
+            Button {
+                if store.availableLabels.isEmpty {
+                    Task { await store.fetchLabels() }
+                }
+                showPicker.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "tag")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(isActive ? accentColor : Color.secondary)
+                        .frame(width: 16)
+                    if isActive {
+                        Text(selectedLabel)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    } else {
+                        Text("INBOX")
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 0)
+                    if isActive {
+                        Button {
+                            selectedLabel = ""
+                            onSelect?()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(minHeight: 44)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isActive ? accentColor.opacity(0.05) : Color(NSColor.controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            showPicker ? accentColor.opacity(0.55) : (isActive ? accentColor.opacity(0.35) : Color.primary.opacity(0.12)),
+                            lineWidth: showPicker ? 1.5 : 1
+                        )
+                )
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.20 : 0.05), radius: 6, x: 0, y: 2)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showPicker, arrowEdge: .bottom) {
+                LabelPickerPopoverContent(
+                    selectedLabel: $selectedLabel,
+                    searchText: $searchText,
+                    onSelect: { _ in
+                        searchText = ""
+                        showPicker = false
+                        onSelect?()
+                    }
+                )
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Compact Date + Attachment Bar
+
+/// Compact single-row date range + attachment toggle for filter panels.
+private struct CompactDateAttachmentBar: View {
+    @Binding var afterDate: Date?
+    @Binding var beforeDate: Date?
+    @Binding var hasAttachment: Bool
+    @Environment(\.appAccentColor) private var accentColor
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            CompactDateChip(label: "After", date: $afterDate)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.tertiary)
+            CompactDateChip(label: "Before", date: $beforeDate)
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 7) {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(hasAttachment ? accentColor : .secondary)
+                Text("Attachment")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(hasAttachment ? .primary : .secondary)
+                Toggle("", isOn: $hasAttachment)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(accentColor)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [accentColor.opacity(0.09), accentColor.opacity(0.03)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(accentColor.opacity(0.20), lineWidth: 1)
+        )
+    }
+}
+
+private struct CompactDateChip: View {
+    let label: String
+    @Binding var date: Date?
+    @Environment(\.appAccentColor) private var accentColor
+    @State private var showPicker = false
+
+    private static let displayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateStyle = .medium
+        return f
+    }()
+
+    private static let queryFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private var displayText: String {
+        guard let date else { return label }
+        return Self.displayFormatter.string(from: date)
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button { showPicker = true } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(date == nil ? .secondary : accentColor)
+                    Text(displayText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(date == nil ? .secondary : .primary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(date == nil ? Color.primary.opacity(0.07) : accentColor.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(
+                            date == nil ? Color.primary.opacity(0.12) : accentColor.opacity(0.40),
+                            lineWidth: 1
+                        )
+                )
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showPicker, arrowEdge: .bottom) {
+                datePickerPopover
+            }
+            if date != nil {
+                Button { date = nil } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var datePickerPopover: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label.uppercased())
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(accentColor.opacity(0.85))
+                    Text(displayText)
+                        .font(.title3.weight(.semibold))
+                }
+                Spacer()
+                if date != nil {
+                    Button("Clear") { date = nil }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(accentColor.opacity(0.90))
+                }
+            }
+            ExpandedCalendarView(selectedDate: $date)
+                .frame(maxWidth: .infinity)
+                .frame(height: 346)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.primary.opacity(0.03))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+            HStack {
+                Spacer()
+                Button("Done") { showPicker = false }
+                    .buttonStyle(.borderedProminent)
+                    .tint(accentColor)
+            }
+        }
+        .padding(16)
+        .frame(width: 430)
+    }
+}
+
 // MARK: - Message Row
 
 struct MessageRowView: View {
@@ -2332,19 +2695,45 @@ struct SendersView: View {
     @State private var hoveredSender: SenderAggregate?
     @State private var lockedSender: SenderAggregate?
     @State private var detailFilter: String = ""
+    @State private var senderSearchText: String = ""
 
     private var detailSender: SenderAggregate? { lockedSender ?? hoveredSender }
+    private var normalizedSenderQuery: String {
+        senderSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+    private var isSearchingAllSenders: Bool { !normalizedSenderQuery.isEmpty }
+    private var senderSource: [SenderAggregate] {
+        if isSearchingAllSenders {
+            return store.allSenders.isEmpty ? store.senders : store.allSenders
+        }
+        return store.senders
+    }
+    private var filteredSenders: [SenderAggregate] {
+        guard isSearchingAllSenders else { return senderSource }
+        return senderSource.filter { sender in
+            sender.name.lowercased().contains(normalizedSenderQuery) || sender.email.lowercased().contains(normalizedSenderQuery)
+        }
+    }
+
+    private var displayedSenders: [SenderAggregate] {
+        filteredSenders
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             // Left column: sender list
             VStack(spacing: 0) {
                 HStack {
-                    Text("Top Senders")
+                    Text("Sender Search")
                         .font(.title2.bold())
                     Spacer()
                     Button("Refresh") {
-                        Task { await store.loadTopSenders() }
+                        Task {
+                            await store.loadTopSenders()
+                            if isSearchingAllSenders {
+                                await store.loadAllSendersIfNeeded(forceRefresh: true)
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -2352,24 +2741,67 @@ struct SendersView: View {
                 .padding()
                 .background(.bar)
 
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search senders...", text: $senderSearchText)
+                        .textFieldStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.secondary.opacity(0.10))
+                )
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(.bar)
+
+                if isSearchingAllSenders && store.isLoadingAllSenders && store.allSenders.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Searching all senders...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                    .background(.bar)
+                }
+
                 Divider()
 
                 if store.isLoading {
                     Spacer()
                     ProgressView("Loading senders...")
                     Spacer()
-                } else if store.senders.isEmpty {
+                } else if !isSearchingAllSenders && store.senders.isEmpty {
                     Spacer()
                     VStack(spacing: 12) {
                         Image(systemName: "person.2")
                             .font(.system(size: 48))
                             .foregroundStyle(.tertiary)
-                        Text("Click Refresh to load top senders")
+                        Text("Click Refresh to load senders")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                } else if isSearchingAllSenders && store.isLoadingAllSenders && store.allSenders.isEmpty {
+                    Spacer()
+                    ProgressView("Searching all senders...")
+                    Spacer()
+                } else if displayedSenders.isEmpty {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.tertiary)
+                        Text("No senders match your search")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                 } else {
-                    List(store.senders) { sender in
+                    List(displayedSenders) { sender in
                         senderRow(for: sender)
                             .contentShape(Rectangle())
                             .onHover { isHovering in
@@ -2393,10 +2825,31 @@ struct SendersView: View {
                             }
                             .background(
                                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(lockedSender?.id == sender.id
-                                          ? accentColor.opacity(0.12)
-                                          : Color.clear)
+                                    .fill(
+                                        lockedSender?.id == sender.id
+                                        ? accentColor.opacity(0.50)
+                                        : (hoveredSender?.id == sender.id ? accentColor.opacity(0.30) : Color.clear)
+                                    )
                             )
+                            .overlay(alignment: .topTrailing) {
+                                if lockedSender?.id == sender.id {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(accentColor)
+                                        .rotationEffect(.degrees(24))
+                                        .padding(4)
+                                        .background(
+                                            Circle()
+                                                .fill(.regularMaterial)
+                                        )
+                                        .overlay(
+                                            Circle()
+                                                .stroke(accentColor.opacity(0.35), lineWidth: 1)
+                                        )
+                                        .shadow(color: accentColor.opacity(0.25), radius: 3, y: 1)
+                                        .offset(x: 8, y: -6)
+                                }
+                            }
                     }
                     .listStyle(.inset)
                 }
@@ -2428,6 +2881,22 @@ struct SendersView: View {
             if store.senders.isEmpty {
                 await store.loadTopSenders()
             }
+            if isSearchingAllSenders {
+                await store.loadAllSendersIfNeeded()
+            }
+        }
+        .onChange(of: senderSearchText) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                Task { await store.loadAllSendersIfNeeded() }
+            }
+            syncSelectionToVisibleSenders()
+        }
+        .onChange(of: store.senders) { _, _ in
+            syncSelectionToVisibleSenders()
+        }
+        .onChange(of: store.allSenders) { _, _ in
+            syncSelectionToVisibleSenders()
         }
     }
 
@@ -2456,13 +2925,20 @@ struct SendersView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
-            if lockedSender?.id == sender.id {
-                Image(systemName: "pin.fill")
-                    .font(.caption)
-                    .foregroundStyle(accentColor)
-            }
         }
-        .padding(.vertical, 5)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private func syncSelectionToVisibleSenders() {
+        let visibleEmails = Set(displayedSenders.map(\.email))
+        if let locked = lockedSender, !visibleEmails.contains(locked.email) {
+            lockedSender = nil
+            detailFilter = ""
+        }
+        if let hovered = hoveredSender, !visibleEmails.contains(hovered.email) {
+            hoveredSender = nil
+        }
     }
 }
 
@@ -2481,6 +2957,84 @@ struct SenderDetailPanel: View {
     @State private var localMessageDetail: String = ""
     @State private var localMessageDetailHTML: String?
     @State private var isLoadingDetail = false
+    @State private var showAdvancedFilters = false
+    @State private var filterTo = ""
+    @State private var filterCC = ""
+    @State private var filterBCC = ""
+    @State private var filterSubject = ""
+    @State private var filterAfterDate: Date?
+    @State private var filterBeforeDate: Date?
+    @State private var filterRelativeDate: SenderRelativeDatePreset = .none
+    @State private var filterSizePreset: SenderSizePreset = .none
+    @State private var filterHasAttachment = false
+    @State private var filterLabel = ""
+    @State private var remoteFilteredMessages: [EmailMessage] = []
+    @State private var isRunningRemoteFilterSearch = false
+    @State private var remoteFilterError: String?
+    @State private var remoteFilterTask: Task<Void, Never>?
+
+    private enum SenderRelativeDatePreset: String, CaseIterable, Identifiable {
+        case none
+        case lastDay
+        case lastWeek
+        case lastMonth
+        case lastThreeMonths
+        case lastYear
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: return "Any time"
+            case .lastDay: return "Last 24 hours"
+            case .lastWeek: return "Last 7 days"
+            case .lastMonth: return "Last 30 days"
+            case .lastThreeMonths: return "Last 3 months"
+            case .lastYear: return "Last year"
+            }
+        }
+
+        var queryToken: String? {
+            switch self {
+            case .none: return nil
+            case .lastDay: return "newer_than:1d"
+            case .lastWeek: return "newer_than:7d"
+            case .lastMonth: return "newer_than:30d"
+            case .lastThreeMonths: return "newer_than:90d"
+            case .lastYear: return "newer_than:365d"
+            }
+        }
+    }
+
+    private enum SenderSizePreset: String, CaseIterable, Identifiable {
+        case none
+        case largerThan1MB
+        case largerThan5MB
+        case largerThan10MB
+        case smallerThan500KB
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: return "Any size"
+            case .largerThan1MB: return "Larger than 1 MB"
+            case .largerThan5MB: return "Larger than 5 MB"
+            case .largerThan10MB: return "Larger than 10 MB"
+            case .smallerThan500KB: return "Smaller than 500 KB"
+            }
+        }
+
+        var queryToken: String? {
+            switch self {
+            case .none: return nil
+            case .largerThan1MB: return "larger:1M"
+            case .largerThan5MB: return "larger:5M"
+            case .largerThan10MB: return "larger:10M"
+            case .smallerThan500KB: return "smaller:500K"
+            }
+        }
+    }
 
     private static let isoDateFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -2532,10 +3086,33 @@ struct SenderDetailPanel: View {
             .sorted { sortableDate($0.date) > sortableDate($1.date) }
     }
 
+    private var hasAdvancedFilters: Bool {
+        !filterTo.isEmpty || !filterCC.isEmpty || !filterBCC.isEmpty || !filterSubject.isEmpty ||
+        filterAfterDate != nil || filterBeforeDate != nil || filterRelativeDate != .none ||
+        filterSizePreset != .none || filterHasAttachment || !filterLabel.isEmpty
+    }
+
+    private var activeAdvancedFilterCount: Int {
+        [!filterTo.isEmpty, !filterCC.isEmpty, !filterBCC.isEmpty, !filterSubject.isEmpty,
+         filterAfterDate != nil, filterBeforeDate != nil, filterRelativeDate != .none,
+         filterSizePreset != .none, filterHasAttachment, !filterLabel.isEmpty]
+            .filter { $0 }.count
+    }
+
+    private var sourceMessages: [EmailMessage] {
+        hasAdvancedFilters
+            ? remoteFilteredMessages.sorted { sortableDate($0.date) > sortableDate($1.date) }
+            : allMessages
+    }
+
     private var filteredMessages: [EmailMessage] {
+        if hasAdvancedFilters {
+            return sourceMessages
+        }
+
         let trimmed = detailFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty else { return allMessages }
-        return allMessages.filter { msg in
+        guard !trimmed.isEmpty else { return sourceMessages }
+        return sourceMessages.filter { msg in
             msg.subject.lowercased().contains(trimmed) ||
             msg.snippet.lowercased().contains(trimmed) ||
             msg.date.lowercased().contains(trimmed)
@@ -2638,7 +3215,7 @@ struct SenderDetailPanel: View {
 
                 // Filter bar
                 HStack(spacing: 8) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
+                    Image(systemName: "magnifyingglass")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(detailFilter.isEmpty ? Color.secondary : accentColor)
                     TextField("Filter by subject or keyword…", text: $detailFilter)
@@ -2648,6 +3225,7 @@ struct SenderDetailPanel: View {
                             selectedMessage = nil
                             localMessageDetail = ""
                             localMessageDetailHTML = nil
+                            scheduleRemoteFilterSearchIfNeeded()
                         }
                     if !detailFilter.isEmpty {
                         Button { detailFilter = "" } label: {
@@ -2657,10 +3235,126 @@ struct SenderDetailPanel: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            showAdvancedFilters.toggle()
+                        }
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: showAdvancedFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle((showAdvancedFilters || hasAdvancedFilters) ? accentColor : .secondary)
+                            if activeAdvancedFilterCount > 0 {
+                                Text("\(activeAdvancedFilterCount)")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(accentColor)
+                                    .clipShape(Capsule())
+                                    .offset(x: 7, y: -8)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show advanced filters")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+
+                if showAdvancedFilters {
+                    VStack(spacing: 12) {
+                        Divider().opacity(0.5)
+
+                        HStack(spacing: 12) {
+                            FilterField(label: "To", placeholder: "recipient@example.com", text: $filterTo, icon: "person.2")
+                            FilterField(label: "CC", placeholder: "team@example.com", text: $filterCC, icon: "person.3")
+                        }
+
+                        HStack(spacing: 12) {
+                            FilterField(label: "BCC", placeholder: "archive@example.com", text: $filterBCC, icon: "person.crop.circle.badge.checkmark")
+                            FilterField(label: "Subject", placeholder: "meeting notes", text: $filterSubject, icon: "text.alignleft")
+                        }
+
+                        HStack(spacing: 12) {
+                            FilterFieldLabelPicker(selectedLabel: $filterLabel, onSelect: { scheduleRemoteFilterSearchIfNeeded() })
+
+                            Picker("Quick Date", selection: $filterRelativeDate) {
+                                ForEach(SenderRelativeDatePreset.allCases) { preset in
+                                    Text(preset.label).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        HStack(spacing: 12) {
+                            Picker("Size", selection: $filterSizePreset) {
+                                ForEach(SenderSizePreset.allCases) { preset in
+                                    Text(preset.label).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Spacer()
+                        }
+
+                        Text("To/CC/BCC/Subject support partial matching. Sender is fixed to \(sender.email).")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        CompactDateAttachmentBar(
+                            afterDate: $filterAfterDate,
+                            beforeDate: $filterBeforeDate,
+                            hasAttachment: $filterHasAttachment
+                        )
+
+                        if hasAdvancedFilters {
+                            HStack {
+                                activeAdvancedFilterChips
+                                Spacer()
+                                Button("Clear filters") {
+                                    clearAdvancedFilters()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.plain)
+                                .foregroundStyle(accentColor)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .background(.bar.opacity(0.25))
+                }
+
+                if hasAdvancedFilters && (isRunningRemoteFilterSearch || remoteFilterError != nil) {
+                    HStack(spacing: 8) {
+                        if isRunningRemoteFilterSearch {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Applying sender filters…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if let remoteFilterError {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            Text(remoteFilterError)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.bar.opacity(0.25))
+                }
 
                 Divider()
 
@@ -2675,10 +3369,13 @@ struct SenderDetailPanel: View {
                         Image(systemName: "envelope.open")
                             .font(.system(size: 32))
                             .foregroundStyle(.tertiary)
-                        Text(detailFilter.isEmpty ? "No emails found for this sender" : "No emails match the filter")
+                        Text(emptyStateMessage)
                             .foregroundStyle(.secondary)
-                        if !detailFilter.isEmpty {
-                            Button("Clear filter") { detailFilter = "" }
+                        if hasAdvancedFilters || !detailFilter.isEmpty {
+                            Button("Clear filters") {
+                                detailFilter = ""
+                                clearAdvancedFilters()
+                            }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
                         }
@@ -2803,7 +3500,229 @@ struct SenderDetailPanel: View {
             selectedMessage = nil
             localMessageDetail = ""
             localMessageDetailHTML = nil
+            remoteFilteredMessages = []
+            remoteFilterError = nil
+            scheduleRemoteFilterSearchIfNeeded()
         }
+        .onChange(of: filterTo) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterCC) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterBCC) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterSubject) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterAfterDate) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterBeforeDate) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterRelativeDate) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterSizePreset) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterHasAttachment) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onChange(of: filterLabel) { _, _ in scheduleRemoteFilterSearchIfNeeded() }
+        .onDisappear {
+            remoteFilterTask?.cancel()
+        }
+    }
+
+    private var emptyStateMessage: String {
+        if hasAdvancedFilters {
+            return "No emails match these sender filters"
+        }
+        if detailFilter.isEmpty {
+            return "No emails found for this sender"
+        }
+        return "No emails match the filter"
+    }
+
+    private var activeAdvancedFilterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                if !filterTo.isEmpty {
+                    let prefix = isLikelyExactEmailAddress(filterTo) ? "to:" : "to~:"
+                    filterChip("\(prefix)\(filterTo)") { filterTo = "" }
+                }
+                if !filterCC.isEmpty {
+                    let prefix = isLikelyExactEmailAddress(filterCC) ? "cc:" : "cc~:"
+                    filterChip("\(prefix)\(filterCC)") { filterCC = "" }
+                }
+                if !filterBCC.isEmpty {
+                    let prefix = isLikelyExactEmailAddress(filterBCC) ? "bcc:" : "bcc~:"
+                    filterChip("\(prefix)\(filterBCC)") { filterBCC = "" }
+                }
+                if !filterSubject.isEmpty { filterChip("subject~:\(filterSubject)") { filterSubject = "" } }
+                if let filterAfterDate {
+                    filterChip("after:\(queryDateString(filterAfterDate))") { self.filterAfterDate = nil }
+                }
+                if let filterBeforeDate {
+                    filterChip("before:\(queryDateString(filterBeforeDate))") { self.filterBeforeDate = nil }
+                }
+                if let relativeDateToken = filterRelativeDate.queryToken {
+                    filterChip(relativeDateToken) { filterRelativeDate = .none }
+                }
+                if let sizeToken = filterSizePreset.queryToken {
+                    filterChip(sizeToken) { filterSizePreset = .none }
+                }
+                if filterHasAttachment { filterChip("has:attachment") { filterHasAttachment = false } }
+                if !filterLabel.isEmpty { filterChip("label:\(filterLabel)") { filterLabel = "" } }
+            }
+        }
+    }
+
+    private func filterChip(_ text: String, onRemove: @escaping () -> Void) -> some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .font(.caption2.monospaced())
+            Button { onRemove() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(accentColor.opacity(0.12))
+        .foregroundStyle(accentColor)
+        .clipShape(Capsule())
+    }
+
+    private func clearAdvancedFilters() {
+        filterTo = ""
+        filterCC = ""
+        filterBCC = ""
+        filterSubject = ""
+        filterAfterDate = nil
+        filterBeforeDate = nil
+        filterRelativeDate = .none
+        filterSizePreset = .none
+        filterHasAttachment = false
+        filterLabel = ""
+    }
+
+    private func scheduleRemoteFilterSearchIfNeeded() {
+        remoteFilterTask?.cancel()
+
+        guard hasAdvancedFilters else {
+            remoteFilteredMessages = []
+            remoteFilterError = nil
+            isRunningRemoteFilterSearch = false
+            return
+        }
+
+        let query = buildSenderFilterQuery()
+        guard !query.isEmpty else {
+            remoteFilteredMessages = []
+            remoteFilterError = nil
+            isRunningRemoteFilterSearch = false
+            return
+        }
+
+        isRunningRemoteFilterSearch = true
+        remoteFilterError = nil
+
+        remoteFilterTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+
+            do {
+                let messages = try await store.searchRawMessages(query: query, limit: 200)
+                guard !Task.isCancelled else { return }
+                remoteFilteredMessages = messages
+                if let selectedMessage, !messages.contains(where: { $0.id == selectedMessage.id }) {
+                    self.selectedMessage = nil
+                    localMessageDetail = ""
+                    localMessageDetailHTML = nil
+                }
+                remoteFilterError = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                remoteFilteredMessages = []
+                remoteFilterError = "Failed to apply filters. Please try again."
+            }
+            isRunningRemoteFilterSearch = false
+        }
+    }
+
+    private func buildSenderFilterQuery() -> String {
+        var parts: [String] = [makeOperatorToken(prefix: "from:", value: sender.email)]
+
+        let toFilter = filterTo.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !toFilter.isEmpty {
+            if isLikelyExactEmailAddress(toFilter) {
+                parts.append(makeOperatorToken(prefix: "to:", value: toFilter))
+            } else {
+                parts.append(makeKeywordToken(toFilter))
+            }
+        }
+
+        let ccFilter = filterCC.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ccFilter.isEmpty {
+            if isLikelyExactEmailAddress(ccFilter) {
+                parts.append(makeOperatorToken(prefix: "cc:", value: ccFilter))
+            } else {
+                parts.append(makeKeywordToken(ccFilter))
+            }
+        }
+
+        let bccFilter = filterBCC.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !bccFilter.isEmpty {
+            if isLikelyExactEmailAddress(bccFilter) {
+                parts.append(makeOperatorToken(prefix: "bcc:", value: bccFilter))
+            } else {
+                parts.append(makeKeywordToken(bccFilter))
+            }
+        }
+
+        let subjectFilter = filterSubject.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !subjectFilter.isEmpty {
+            parts.append(makeOperatorToken(prefix: "subject:", value: subjectFilter))
+        }
+
+        if let filterAfterDate { parts.append("after:\(queryDateString(filterAfterDate))") }
+        if let filterBeforeDate { parts.append("before:\(queryDateString(filterBeforeDate))") }
+        if filterAfterDate == nil, filterBeforeDate == nil, let relativeToken = filterRelativeDate.queryToken {
+            parts.append(relativeToken)
+        }
+        if let sizeToken = filterSizePreset.queryToken {
+            parts.append(sizeToken)
+        }
+        if filterHasAttachment {
+            parts.append("has:attachment")
+        }
+
+        let labelFilter = filterLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !labelFilter.isEmpty {
+            parts.append(makeOperatorToken(prefix: "label:", value: labelFilter))
+        }
+
+        let keywordFilter = detailFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !keywordFilter.isEmpty {
+            parts.append(makeKeywordToken(keywordFilter))
+        }
+
+        return parts.joined(separator: " ")
+    }
+
+    private func queryDateString(_ date: Date) -> String {
+        Self.queryDateFormatter.string(from: date)
+    }
+
+    private func makeOperatorToken(prefix: String, value: String) -> String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.contains(where: \.isWhitespace) else {
+            return "\(prefix)\(cleaned)"
+        }
+        let escaped = cleaned.replacingOccurrences(of: "\"", with: "\\\"")
+        return "\(prefix)\"\(escaped)\""
+    }
+
+    private func makeKeywordToken(_ value: String) -> String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.contains(where: \.isWhitespace) else { return cleaned }
+        let escaped = cleaned.replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private func isLikelyExactEmailAddress(_ value: String) -> Bool {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = cleaned.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return false }
+        guard !parts[0].isEmpty, !parts[1].isEmpty else { return false }
+        return parts[1].contains(".")
     }
 
     private func selectMessage(_ message: EmailMessage) {
@@ -2873,68 +3792,323 @@ struct SenderDetailPanel: View {
 struct StatsView: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.appAccentColor) private var accentColor
+    @State private var selectedMailActionTab: MailActionTab = .topUnopened
+    @State private var mailActionSearchText = ""
+    @State private var attachmentAccountFilter: String = ""
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+    
+    private enum MailActionTab: String, CaseIterable, Identifiable {
+        case topUnopened
+        case unreadMomentum
+        case attachmentCleanup
+        
+        var id: String { rawValue }
+        
+        var title: String {
+            switch self {
+            case .topUnopened: return "Top Unopened Candidates"
+            case .unreadMomentum: return "Unread Momentum"
+            case .attachmentCleanup: return "Attachment Cleanup Candidates"
+            }
+        }
+        
+        var subtitle: String {
+            switch self {
+            case .topUnopened: return "Best unsubscribe targets based on unread chain volume."
+            case .unreadMomentum: return "Senders creating fresh unread traffic in the last 30 days."
+            case .attachmentCleanup: return "Senders driving the largest attachment storage build-up."
+            }
+        }
+        
+        var icon: String {
+            switch self {
+            case .topUnopened: return "bell.slash"
+            case .unreadMomentum: return "clock.badge.exclamationmark"
+            case .attachmentCleanup: return "paperclip.badge.ellipsis"
+            }
+        }
+        
+        var teaser: String {
+            switch self {
+            case .topUnopened: return "• Unopened chains • Unread load • Unsubscribe targets"
+            case .unreadMomentum: return "• Last 30d trend • Fresh unread build-up"
+            case .attachmentCleanup: return "• Total attachment size • Storage build-up"
+            }
+        }
+        
+        var primaryActionTitle: String {
+            switch self {
+            case .topUnopened: return "Review unread"
+            case .unreadMomentum: return "Open 30d unread"
+            case .attachmentCleanup: return "Review attachments"
+            }
+        }
+        
+        var secondaryActionTitle: String {
+            switch self {
+            case .topUnopened: return "Find unsubscribe links"
+            case .unreadMomentum: return "Open sender in Search"
+            case .attachmentCleanup: return "Find large files"
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Archive Statistics")
-                    .font(.title2.bold())
-                Spacer()
-                Button("Refresh") {
-                    Task { await store.loadStats() }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-            .padding()
-            .background(.bar)
-            
+            statsHeader
             Divider()
-            
-            if store.isLoading {
-                Spacer()
-                ProgressView("Loading stats...")
-                Spacer()
-            } else if let stats = store.statsInfo {
-                ScrollView {
-                    LazyVGrid(columns: [
-                        GridItem(.flexible()),
-                        GridItem(.flexible()),
-                    ], spacing: 16) {
-                        StatCard(title: "Total Messages", value: formatWholeNumber(stats.totalMessages), icon: "envelope.fill", color: accentColor)
-                        StatCard(title: "Accounts", value: formatWholeNumber(stats.totalAccounts), icon: "person.crop.circle", color: .blue)
-                        StatCard(title: "Attachments", value: formatWholeNumber(stats.totalAttachments), icon: "paperclip", color: .orange)
-                        StatCard(title: "Database Size", value: stats.dbSize, icon: "internaldrive", color: .purple)
-                    }
-                    .padding()
-                    
-                    if !stats.lastSync.isEmpty {
-                        HStack {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .foregroundStyle(.secondary)
-                            Text("Last sync: \(stats.lastSync)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding()
-                    }
-                }
-            } else {
-                Spacer()
-                VStack(spacing: 12) {
-                    Image(systemName: "chart.bar")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Click Refresh to load archive statistics")
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
+            statsContent
         }
         .task {
             if store.statsInfo == nil {
                 await store.loadStats()
             }
+            if store.mailActionInsights == nil {
+                await store.loadMailActionInsights(toAccount: attachmentAccountFilter)
+            }
+        }
+        .onChange(of: attachmentAccountFilter) { _, _ in
+            Task { await store.loadMailActionInsights(toAccount: attachmentAccountFilter) }
+        }
+    }
+
+    private var statsHeader: some View {
+        HStack {
+            Text("Archive Statistics")
+                .font(.title2.bold())
+            Spacer()
+            Button("Refresh") {
+                Task { await refreshAll() }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(store.isLoading || store.isLoadingMailActionInsights)
+        }
+        .padding()
+        .background(.bar)
+    }
+
+    @ViewBuilder
+    private var statsContent: some View {
+        if store.isLoading {
+            Spacer()
+            ProgressView("Loading stats...")
+            Spacer()
+        } else if let stats = store.statsInfo {
+            ScrollView {
+                statsOverviewGrid(stats)
+
+                if !stats.lastSync.isEmpty {
+                    HStack {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(.secondary)
+                        Text("Last sync: \(stats.lastSync)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                }
+
+                mailActionsPanel
+                    .padding()
+            }
+        } else {
+            Spacer()
+            VStack(spacing: 12) {
+                Image(systemName: "chart.bar")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.tertiary)
+                Text("Click Refresh to load archive statistics")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    private func statsOverviewGrid(_ stats: StatsInfo) -> some View {
+        LazyVGrid(columns: [
+            GridItem(.flexible()),
+            GridItem(.flexible()),
+        ], spacing: 16) {
+            StatCard(title: "Total Messages", value: formatWholeNumber(stats.totalMessages), icon: "envelope.fill", color: accentColor)
+            StatCard(title: "Accounts", value: formatWholeNumber(stats.totalAccounts), icon: "person.crop.circle", color: .blue)
+            StatCard(title: "Attachments", value: formatWholeNumber(stats.totalAttachments), icon: "paperclip", color: .orange)
+            StatCard(title: "Database Size", value: stats.dbSize, icon: "internaldrive", color: .purple)
+        }
+        .padding()
+    }
+
+    private var mailActionsPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Mail Actions")
+                    .font(.title3.bold())
+                Spacer()
+                if store.isLoadingMailActionInsights {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if let insights = store.mailActionInsights {
+                    Text("Updated \(relativeTime(for: insights.generatedAt))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("Actionable cleanup suggestions based on senders, unopened chains, and attachment-heavy traffic.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let insightsError = store.mailActionInsightsError, !insightsError.isEmpty {
+                Label(insightsError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 10) {
+                ForEach(MailActionTab.allCases) { tab in
+                    Button {
+                        selectedMailActionTab = tab
+                    } label: {
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 6) {
+                                Image(systemName: tab.icon)
+                                    .font(.caption.weight(.semibold))
+                                Text(tab.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(2)
+                                Spacer(minLength: 0)
+                            }
+                            Text(tab.teaser)
+                                .font(.caption2)
+                                .foregroundStyle(selectedMailActionTab == tab ? .white.opacity(0.9) : .secondary)
+                                .lineLimit(2)
+                            HStack {
+                                Text("\(formatWholeNumber(items(for: tab).count)) candidates")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(selectedMailActionTab == tab ? .white.opacity(0.9) : .secondary)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, minHeight: 96, alignment: .topLeading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(
+                                    selectedMailActionTab == tab
+                                    ? AnyShapeStyle(
+                                        LinearGradient(
+                                            colors: [accentColor.opacity(0.9), accentColor.opacity(0.65)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
+                                )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(
+                                    selectedMailActionTab == tab ? Color.clear : Color.primary.opacity(0.08),
+                                    lineWidth: 1
+                                )
+                        )
+                        .foregroundStyle(selectedMailActionTab == tab ? .white : .primary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: selectedMailActionTab.icon)
+                        .foregroundStyle(accentColor)
+                    Text(selectedMailActionTab.title)
+                        .font(.headline)
+                    Spacer(minLength: 0)
+                    if selectedMailActionTab == .attachmentCleanup && !store.accounts.isEmpty {
+                        Menu {
+                            Button("All accounts") { attachmentAccountFilter = "" }
+                            Divider()
+                            ForEach(store.accounts) { account in
+                                Button(account.email) { attachmentAccountFilter = account.email }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(attachmentAccountFilter.isEmpty ? "Account: All" : attachmentAccountFilter)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundStyle(attachmentAccountFilter.isEmpty ? .primary : accentColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(attachmentAccountFilter.isEmpty
+                                          ? Color(NSColor.controlBackgroundColor)
+                                          : accentColor.opacity(0.12))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(attachmentAccountFilter.isEmpty
+                                                  ? Color.primary.opacity(0.08)
+                                                  : accentColor.opacity(0.30), lineWidth: 1)
+                            )
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Filter attachment candidates by recipient account")
+                    }
+                    Text("\(formatWholeNumber(filteredItemsForSelectedTab().count)) shown")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(selectedMailActionTab.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search this section (sender or email)", text: $mailActionSearchText)
+                        .textFieldStyle(.plain)
+                    if !mailActionSearchText.isEmpty {
+                        Button {
+                            mailActionSearchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.windowBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                if filteredItemsForSelectedTab().isEmpty {
+                    Text(emptyStateText(for: selectedMailActionTab))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                } else {
+                    mailActionItemList(
+                        items: filteredItemsForSelectedTab(),
+                        tab: selectedMailActionTab
+                    )
+                }
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.background.secondary)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
         }
     }
     
@@ -2943,6 +4117,229 @@ struct StatsView: View {
         formatter.numberStyle = .decimal
         formatter.groupingSeparator = ","
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    private func refreshAll() async {
+        async let statsTask: Void = store.loadStats()
+        async let actionsTask: Void = store.loadMailActionInsights(toAccount: attachmentAccountFilter)
+        _ = await (statsTask, actionsTask)
+    }
+
+    private func relativeTime(for date: Date) -> String {
+        Self.relativeDateFormatter.localizedString(for: date, relativeTo: Date())
+    }
+    
+    private func items(for tab: MailActionTab) -> [MailActionInsightItem] {
+        guard let insights = store.mailActionInsights else { return [] }
+        switch tab {
+        case .topUnopened:
+            return insights.unsubscribeCandidates
+        case .unreadMomentum:
+            return insights.unreadMomentum
+        case .attachmentCleanup:
+            return insights.attachmentHeavySenders
+        }
+    }
+    
+    private func filteredItemsForSelectedTab() -> [MailActionInsightItem] {
+        let source = items(for: selectedMailActionTab)
+        let search = mailActionSearchText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !search.isEmpty else { return source }
+        return source.filter { item in
+            item.senderName.lowercased().contains(search) ||
+            item.senderEmail.lowercased().contains(search)
+        }
+    }
+    
+    private func emptyStateText(for tab: MailActionTab) -> String {
+        switch tab {
+        case .topUnopened:
+            return "No strong unsubscribe candidates right now."
+        case .unreadMomentum:
+            return "No recent unread momentum detected."
+        case .attachmentCleanup:
+            return "No attachment-heavy senders found in the sample."
+        }
+    }
+    
+    private func primaryActionKeywords(for tab: MailActionTab) -> String {
+        switch tab {
+        case .topUnopened:
+            return "label:UNREAD"
+        case .unreadMomentum:
+            return "label:UNREAD newer_than:30d"
+        case .attachmentCleanup:
+            return "has:attachment"
+        }
+    }
+    
+    private func secondaryActionKeywords(for tab: MailActionTab) -> String {
+        switch tab {
+        case .topUnopened:
+            return "unsubscribe"
+        case .unreadMomentum:
+            return ""
+        case .attachmentCleanup:
+            return "has:attachment larger:5M"
+        }
+    }
+
+    @ViewBuilder
+    private func mailActionItemList(items: [MailActionInsightItem], tab: MailActionTab) -> some View {
+        let maxSize = items.map(\.totalAttachmentSizeBytes).max() ?? 1
+        ForEach(items) { item in
+            MailActionInsightRow(
+                item: item,
+                isAttachmentTab: tab == .attachmentCleanup,
+                maxAttachmentSizeBytes: maxSize,
+                primaryActionTitle: tab.primaryActionTitle,
+                secondaryActionTitle: tab.secondaryActionTitle,
+                primaryKeywords: primaryActionKeywords(for: tab),
+                secondaryKeywords: secondaryActionKeywords(for: tab),
+                accentColor: accentColor
+            )
+        }
+    }
+
+    private func formatAttachmentSize(_ bytes: Int) -> String {
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1000 {
+            return String(format: "%.1f GB", mb / 1024)
+        } else if mb >= 1 {
+            return String(format: "%.1f MB", mb)
+        } else {
+            return String(format: "%d KB", max(bytes / 1024, 1))
+        }
+    }
+
+    private func attachmentSizeColor(_ bytes: Int) -> Color {
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 100 { return .red }
+        if mb >= 25  { return .orange }
+        return .secondary
+    }
+
+    private func statPill(_ value: String) -> some View {
+        Text(value)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.background.tertiary)
+            .clipShape(Capsule())
+    }
+}
+
+// MARK: - Mail Action Insight Row
+
+private struct MailActionInsightRow: View {
+    @EnvironmentObject var store: EmailStore
+    let item: MailActionInsightItem
+    let isAttachmentTab: Bool
+    let maxAttachmentSizeBytes: Int
+    let primaryActionTitle: String
+    let secondaryActionTitle: String
+    let primaryKeywords: String
+    let secondaryKeywords: String
+    let accentColor: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.senderName.isEmpty ? item.senderEmail : item.senderName)
+                        .font(.subheadline.weight(.semibold))
+                    Text(item.senderEmail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isAttachmentTab {
+                    Text(formattedSize)
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(sizeColor)
+                } else {
+                    Text("\(item.unopenedChains) unopened chains")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if isAttachmentTab {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.primary.opacity(0.06))
+                            .frame(height: 5)
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(sizeColor.opacity(0.75))
+                            .frame(
+                                width: geo.size.width * CGFloat(item.totalAttachmentSizeBytes) / CGFloat(max(maxAttachmentSizeBytes, 1)),
+                                height: 5
+                            )
+                    }
+                }
+                .frame(height: 5)
+            }
+
+            HStack(spacing: 8) {
+                if isAttachmentTab {
+                    statPill("\(item.messagesWithAttachments) w/attachments")
+                } else {
+                    statPill("\(item.unreadMessages) unread")
+                    statPill("\(item.unreadInLast30Days) in 30d")
+                    statPill("\(item.messagesWithAttachments) w/attachments")
+                }
+                Spacer(minLength: 0)
+                Button(primaryActionTitle) {
+                    store.searchForSenderRequest = SenderSearchRequest(
+                        senderEmail: item.senderEmail,
+                        additionalKeywords: primaryKeywords
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(accentColor)
+                .controlSize(.mini)
+
+                Button(secondaryActionTitle) {
+                    store.searchForSenderRequest = SenderSearchRequest(
+                        senderEmail: item.senderEmail,
+                        additionalKeywords: secondaryKeywords
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
+        }
+        .padding(12)
+        .background(.background.secondary)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var formattedSize: String {
+        let mb = Double(item.totalAttachmentSizeBytes) / 1_048_576
+        if mb >= 1000 { return String(format: "%.1f GB", mb / 1024) }
+        if mb >= 1    { return String(format: "%.1f MB", mb) }
+        return String(format: "%d KB", max(item.totalAttachmentSizeBytes / 1024, 1))
+    }
+
+    private var sizeColor: Color {
+        let mb = Double(item.totalAttachmentSizeBytes) / 1_048_576
+        if mb >= 100 { return .red }
+        if mb >= 25  { return .orange }
+        return .secondary
+    }
+
+    private func statPill(_ value: String) -> some View {
+        Text(value)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.background.tertiary)
+            .clipShape(Capsule())
     }
 }
 
@@ -3269,7 +4666,7 @@ struct SettingsView: View {
     @Environment(\.appAccentColor) private var accentColor
     @State private var binaryPath: String = ""
     @State private var testResult: String = ""
-    @State private var selectedTab: SettingsTab = .binary
+    @State private var selectedTab: SettingsTab = .ai
     @State private var aiModelDraft = ""
     @State private var aiTestInput = "emails from mckinsey last week about strategy with attachments"
     @State private var aiTestOutput = ""
@@ -3284,33 +4681,50 @@ struct SettingsView: View {
         var id: String { rawValue }
     }
     
-    private struct QwenModelPreset: Identifiable {
+    struct ModelCatalogEntry: Identifiable {
         let id: String
         let tag: String
+        let provider: String
+        let providerColor: Color
+        let displayName: String
         let size: String
         let note: String
+        let recommended: Bool
     }
-    
-    private let qwenModelPresets: [QwenModelPreset] = [
-        QwenModelPreset(
-            id: "qwen-0.8b",
-            tag: "qwen3.5:0.8b",
-            size: "~1.0 GB",
-            note: "Fastest and lightest"
-        ),
-        QwenModelPreset(
-            id: "qwen-2b",
-            tag: "qwen3.5:2b",
-            size: "~2.7 GB",
-            note: "Best balance (recommended)"
-        ),
-        QwenModelPreset(
-            id: "qwen-4b",
-            tag: "qwen3.5:4b",
-            size: "~3.4 GB",
-            note: "Higher quality parsing"
-        )
+
+    private let modelCatalog: [ModelCatalogEntry] = [
+        // Qwen (Alibaba)
+        ModelCatalogEntry(id: "q-0.8b", tag: "qwen3.5:0.8b",  provider: "Qwen",      providerColor: .teal,                                       displayName: "Qwen 3.5 0.8B",  size: "~1.0 GB",  note: "Ultra-fast, minimal RAM",        recommended: false),
+        ModelCatalogEntry(id: "q-2b",   tag: "qwen3.5:2b",    provider: "Qwen",      providerColor: .teal,                                       displayName: "Qwen 3.5 2B",    size: "~2.7 GB",  note: "Best balance — recommended",     recommended: true),
+        ModelCatalogEntry(id: "q-4b",   tag: "qwen3.5:4b",    provider: "Qwen",      providerColor: .teal,                                       displayName: "Qwen 3.5 4B",    size: "~3.4 GB",  note: "Higher accuracy parsing",        recommended: false),
+        // Phi (Microsoft)
+        ModelCatalogEntry(id: "phi-mini",tag: "phi4-mini",    provider: "Microsoft", providerColor: Color(red: 0.0,  green: 0.47, blue: 0.84),   displayName: "Phi-4 Mini 3.8B", size: "~2.5 GB", note: "Excellent structured output",    recommended: false),
+        ModelCatalogEntry(id: "phi4",    tag: "phi4",          provider: "Microsoft", providerColor: Color(red: 0.0,  green: 0.47, blue: 0.84),   displayName: "Phi-4 14B",       size: "~9.1 GB", note: "High accuracy, larger RAM",      recommended: false),
+        // Gemma (Google)
+        ModelCatalogEntry(id: "g-1b",   tag: "gemma3:1b",     provider: "Google",    providerColor: Color(red: 0.89, green: 0.19, blue: 0.17),   displayName: "Gemma 3 1B",      size: "~0.8 GB", note: "Tiny and fast",                  recommended: false),
+        ModelCatalogEntry(id: "g-4b",   tag: "gemma3:4b",     provider: "Google",    providerColor: Color(red: 0.89, green: 0.19, blue: 0.17),   displayName: "Gemma 3 4B",      size: "~3.3 GB", note: "Strong multilingual capability", recommended: false),
+        // Llama (Meta)
+        ModelCatalogEntry(id: "ll-1b",  tag: "llama3.2:1b",   provider: "Meta",      providerColor: Color(red: 0.24, green: 0.35, blue: 0.67),   displayName: "Llama 3.2 1B",    size: "~1.3 GB", note: "Fast and open",                  recommended: false),
+        ModelCatalogEntry(id: "ll-3b",  tag: "llama3.2:3b",   provider: "Meta",      providerColor: Color(red: 0.24, green: 0.35, blue: 0.67),   displayName: "Llama 3.2 3B",    size: "~2.0 GB", note: "Good balance",                   recommended: false),
+        // DeepSeek (reasoning — chain-of-thought distilled, MIT)
+        ModelCatalogEntry(id: "ds-r1-1.5b", tag: "deepseek-r1:1.5b", provider: "DeepSeek", providerColor: Color(red: 0.45, green: 0.20, blue: 0.80), displayName: "DeepSeek-R1 1.5B", size: "~1.1 GB", note: "Tiny reasoning model",           recommended: false),
+        ModelCatalogEntry(id: "ds-r1-7b",   tag: "deepseek-r1:7b",   provider: "DeepSeek", providerColor: Color(red: 0.45, green: 0.20, blue: 0.80), displayName: "DeepSeek-R1 7B",   size: "~5.2 GB", note: "Strong reasoning, heavier model", recommended: false),
     ]
+
+    private var catalogByProvider: [(provider: String, color: Color, entries: [ModelCatalogEntry])] {
+        let providers: [(String, Color)] = [
+            ("Qwen",      .teal),
+            ("DeepSeek",  Color(red: 0.45, green: 0.20, blue: 0.80)),
+            ("Microsoft", Color(red: 0.0,  green: 0.47, blue: 0.84)),
+            ("Google",    Color(red: 0.89, green: 0.19, blue: 0.17)),
+            ("Meta",      Color(red: 0.24, green: 0.35, blue: 0.67)),
+        ]
+        return providers.compactMap { (name, color) in
+            let entries = modelCatalog.filter { $0.provider == name }
+            guard !entries.isEmpty else { return nil }
+            return (provider: name, color: color, entries: entries)
+        }
+    }
 
     private var appTheme: AppTheme {
         AppTheme.from(rawValue: appThemeRawValue)
@@ -3503,179 +4917,22 @@ struct SettingsView: View {
     }
     
     private var aiTab: some View {
-        Form {
-            Section("AI Runtime") {
-                HStack(spacing: 8) {
-                    Image(systemName: store.ollamaReachable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(store.ollamaReachable ? .green : .orange)
-                    Text(store.aiRuntimeStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Refresh") {
-                        Task { await store.refreshAIRuntimeStatus() }
-                    }
-                    .buttonStyle(.bordered)
-                }
-                
-                if let path = store.ollamaBinaryPath, !path.isEmpty {
-                    LabeledContent("Ollama binary") {
-                        Text(path)
-                            .font(.system(.caption2, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
-                }
-                
-                if !store.ollamaInstalledModels.isEmpty {
-                    LabeledContent("Installed models") {
-                        Text("\(store.ollamaInstalledModels.count)")
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(store.ollamaInstalledModels.joined(separator: ", "))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(3)
-                }
-                
-                Text("Current runtime: Ollama. Embedded MLX runtime (no external dependency) can be added later for Apple Silicon.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                
-                if store.isInstallingAIModel {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text(store.aiModelInstallStatus)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } else if !store.aiModelInstallStatus.isEmpty {
-                    Text(store.aiModelInstallStatus)
-                        .font(.caption)
-                        .foregroundStyle(store.aiModelInstallStatus.hasPrefix("Install failed") ? .red : .secondary)
-                }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                AIRuntimeBanner()
+                    .environmentObject(store)
+                AIModelPicker(aiModelDraft: $aiModelDraft, modelCatalog: modelCatalog)
+                    .environmentObject(store)
+                Divider()
+                AIModelCatalog(aiModelDraft: $aiModelDraft, catalogByProvider: catalogByProvider)
+                    .environmentObject(store)
+                Divider()
+                AITranslationTest(aiTestInput: $aiTestInput, aiTestOutput: $aiTestOutput)
+                    .environmentObject(store)
             }
-            
-            Section("AI Search Translation") {
-                Toggle("Enable AI query translation", isOn: Binding(
-                    get: { store.aiSearchEnabled },
-                    set: { store.setAISearchEnabled($0) }
-                ))
-                .tint(accentColor)
-
-                HStack {
-                    TextField("Ollama model name (e.g. qwen3.5:2b)", text: $aiModelDraft)
-                    Button("Save Model") {
-                        store.setAIModelName(aiModelDraft)
-                    }
-                    .buttonStyle(.bordered)
-                    Button(store.isInstallingAIModel && store.installingAIModelName == aiModelDraft ? "Installing..." : "Install") {
-                        let modelToInstall = aiModelDraft
-                        Task { _ = await store.installAIModel(modelToInstall) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(accentColor)
-                    .disabled(
-                        aiModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                        store.isInstallingAIModel
-                    )
-                }
-
-                Toggle("Enable live search as you type", isOn: $store.liveSearchEnabled)
-                    .tint(accentColor)
-                
-                Text(store.aiSearchStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            
-            Section("Recommended Qwen Models") {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(qwenModelPresets) { preset in
-                        HStack(spacing: 10) {
-                            let isInstalled = store.ollamaInstalledModels.contains(preset.tag)
-                            let isInstallingThisModel = store.isInstallingAIModel && store.installingAIModelName == preset.tag
-                            
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(preset.tag)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(accentColor)
-                                Text("\(preset.size) - \(preset.note)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            
-                            Spacer()
-                            
-                            Button(isInstalled ? "Installed" : (isInstallingThisModel ? "Installing..." : "Install")) {
-                                Task { _ = await store.installAIModel(preset.tag) }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(accentColor)
-                            .disabled(isInstalled || store.isInstallingAIModel)
-                            
-                            Button(store.aiModelName == preset.tag ? "Selected" : "Use") {
-                                aiModelDraft = preset.tag
-                                store.setAIModelName(preset.tag)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(store.aiModelName == preset.tag)
-                        }
-                        .padding(.vertical, 3)
-                    }
-                    
-                    Text("Install any preset locally with `ollama pull <model-tag>`, then select it here.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            
-            Section("AI Translation Test") {
-                TextField("Sample natural-language query", text: $aiTestInput, axis: .vertical)
-                    .lineLimit(2...4)
-                
-                Button("Run Local Translation Test") {
-                    Task {
-                        if let result = await store.translateNaturalLanguageSearch(aiTestInput) {
-                            aiTestOutput = result.query
-                        } else {
-                            aiTestOutput = "No translation output. Check AI status above."
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(accentColor)
-
-                if !aiTestOutput.isEmpty {
-                    Text(aiTestOutput)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-            }
-            
-            Section("Search Syntax Help") {
-                VStack(alignment: .leading, spacing: 6) {
-                    syntaxRow("from:john@example.com", "Messages from a sender")
-                    syntaxRow("to:jane@example.com", "Messages to a recipient")
-                    syntaxRow("cc:team@example.com", "CC contains recipient")
-                    syntaxRow("bcc:archive@example.com", "BCC contains recipient")
-                    syntaxRow("subject:invoice", "Subject contains word")
-                    syntaxRow("has:attachment", "Messages with attachments")
-                    syntaxRow("after:2024-01-01", "Messages after date")
-                    syntaxRow("before:2024-12-31", "Messages before date")
-                    syntaxRow("newer_than:7d", "Messages from recent period")
-                    syntaxRow("larger:5M", "Messages over size threshold")
-                    syntaxRow("label:INBOX", "Messages with label")
-                    syntaxRow("project update", "Full-text search")
-                }
-                .font(.system(.caption, design: .monospaced))
-            }
+            .padding()
         }
-        .formStyle(.grouped)
-        .task {
-            await store.refreshAIRuntimeStatus()
-        }
+        .task { await store.refreshAIRuntimeStatus() }
     }
     
     private func syntaxRow(_ syntax: String, _ description: String) -> some View {
@@ -3685,6 +4942,320 @@ struct SettingsView: View {
                 .frame(width: 200, alignment: .leading)
             Text(description)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - AI Settings sub-views (extracted to avoid type-check timeout)
+
+private struct AIRuntimeBanner: View {
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: store.ollamaReachable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(store.ollamaReachable ? .green : .orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(store.ollamaReachable ? "Ollama running" : "Ollama not reachable")
+                        .font(.subheadline.weight(.semibold))
+                    Text(store.aiRuntimeStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") { Task { await store.refreshAIRuntimeStatus() } }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(14)
+            .background(Color(NSColor.controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(store.ollamaReachable ? Color.green.opacity(0.25) : Color.orange.opacity(0.25), lineWidth: 1))
+
+            if store.isInstallingAIModel {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(store.aiModelInstallStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(12)
+                .background(accentColor.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(accentColor.opacity(0.20), lineWidth: 1))
+            } else if !store.aiModelInstallStatus.isEmpty {
+                let isError = store.aiModelInstallStatus.hasPrefix("Install failed")
+                HStack(spacing: 8) {
+                    Image(systemName: isError ? "xmark.circle" : "checkmark.circle")
+                        .foregroundStyle(isError ? .red : .green)
+                    Text(store.aiModelInstallStatus)
+                        .font(.caption)
+                        .foregroundStyle(isError ? .red : .secondary)
+                    Spacer()
+                }
+                .padding(12)
+                .background((isError ? Color.red : Color.green).opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+    }
+}
+
+private struct AIModelPicker: View {
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+    @Binding var aiModelDraft: String
+    let modelCatalog: [SettingsView.ModelCatalogEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Active Model")
+                .font(.headline)
+
+            if store.ollamaInstalledModels.isEmpty {
+                Text(store.ollamaReachable
+                     ? "No models installed yet. Pull one from the catalog below."
+                     : "Start Ollama to see installed models.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 10)],
+                    spacing: 10
+                ) {
+                    ForEach(store.ollamaInstalledModels, id: \.self) { model in
+                        AIInstalledModelCard(
+                            model: model,
+                            isActive: store.aiModelName == model,
+                            catalogEntry: modelCatalog.first { $0.tag == model }
+                        ) {
+                            store.setAIModelName(model)
+                            aiModelDraft = model
+                        }
+                    }
+                }
+            }
+
+            Toggle("Enable AI query translation", isOn: Binding(
+                get: { store.aiSearchEnabled },
+                set: { store.setAISearchEnabled($0) }
+            ))
+            .tint(accentColor)
+
+            Text(store.aiSearchStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct AIInstalledModelCard: View {
+    @Environment(\.appAccentColor) private var accentColor
+    let model: String
+    let isActive: Bool
+    let catalogEntry: SettingsView.ModelCatalogEntry?
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    if let provider = catalogEntry?.provider, let color = catalogEntry?.providerColor {
+                        Text(provider)
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(color.opacity(0.15))
+                            .foregroundStyle(color)
+                            .clipShape(Capsule())
+                    }
+                    Spacer()
+                    if isActive {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(accentColor)
+                    }
+                }
+                Text(catalogEntry?.displayName ?? model)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isActive ? accentColor : .primary)
+                    .lineLimit(1)
+                Text(model)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isActive ? accentColor.opacity(0.10) : Color(NSColor.controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(isActive ? accentColor.opacity(0.45) : Color.primary.opacity(0.10),
+                                  lineWidth: isActive ? 1.5 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct AIModelCatalog: View {
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+    @Binding var aiModelDraft: String
+    let catalogByProvider: [(provider: String, color: Color, entries: [SettingsView.ModelCatalogEntry])]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Model Catalog")
+                .font(.headline)
+            Text("Pull models from Ollama. Small models (0.8B – 4B) work well for query translation with minimal RAM.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(catalogByProvider, id: \.provider) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(group.color)
+                            .frame(width: 4, height: 16)
+                        Text(group.provider)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(group.color)
+                    }
+                    ForEach(group.entries) { entry in
+                        AICatalogRow(entry: entry, aiModelDraft: $aiModelDraft)
+                            .environmentObject(store)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct AICatalogRow: View {
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+    let entry: SettingsView.ModelCatalogEntry
+    @Binding var aiModelDraft: String
+
+    var body: some View {
+        let isInstalled = store.ollamaInstalledModels.contains(entry.tag)
+        let isActive    = store.aiModelName == entry.tag
+        let isPulling   = store.isInstallingAIModel && store.installingAIModelName == entry.tag
+
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(entry.displayName)
+                        .font(.subheadline.weight(.medium))
+                    if entry.recommended {
+                        Text("Recommended")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(accentColor.opacity(0.15))
+                            .foregroundStyle(accentColor)
+                            .clipShape(Capsule())
+                    }
+                }
+                Text("\(entry.size)  ·  \(entry.note)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(entry.tag)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer()
+
+            if isPulling {
+                ProgressView().controlSize(.small).padding(.trailing, 4)
+            } else if isInstalled {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .help("Installed")
+            } else {
+                Button("Install") { Task { _ = await store.installAIModel(entry.tag) } }
+                    .buttonStyle(.bordered)
+                    .disabled(store.isInstallingAIModel)
+                    .controlSize(.small)
+            }
+
+            if isActive {
+                Button("Active") {}
+                    .buttonStyle(.borderedProminent)
+                    .tint(accentColor)
+                    .disabled(true)
+                    .controlSize(.small)
+            } else {
+                Button("Use") {
+                    store.setAIModelName(entry.tag)
+                    aiModelDraft = entry.tag
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(isActive ? accentColor.opacity(0.35) : Color.primary.opacity(0.07), lineWidth: 1)
+        )
+    }
+}
+
+private struct AITranslationTest: View {
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+    @Binding var aiTestInput: String
+    @Binding var aiTestOutput: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Translation Test")
+                .font(.headline)
+            TextField("Type a natural-language query to test...", text: $aiTestInput, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...4)
+            HStack {
+                Button("Run Test") {
+                    Task {
+                        if let result = await store.translateNaturalLanguageSearch(aiTestInput) {
+                            aiTestOutput = result.query
+                        } else {
+                            aiTestOutput = "No output — check runtime status above."
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(accentColor)
+                .disabled(!store.ollamaReachable || !store.aiSearchEnabled || store.isInstallingAIModel)
+
+                if !aiTestOutput.isEmpty {
+                    Button("Clear") { aiTestOutput = "" }.buttonStyle(.bordered)
+                }
+            }
+            if !aiTestOutput.isEmpty {
+                Text(aiTestOutput)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(accentColor)
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(accentColor.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
         }
     }
 }
