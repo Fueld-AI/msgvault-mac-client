@@ -30,6 +30,13 @@
     "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.swiftdeps",
     "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/MsgVaultUIApp.dia"
   },
+  "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/RuntimePaths.swift": {
+    "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/RuntimePaths.d",
+    "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/RuntimePaths.swift.o",
+    "swiftmodule": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/RuntimePaths~partial.swiftmodule",
+    "swift-dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/RuntimePaths.swiftdeps",
+    "diagnostics": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/RuntimePaths.dia"
+  },
   "/Users/glennsmith/coding/GlennMsgVault/MsgVaultUI/SetupWizard.swift": {
     "dependencies": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SetupWizard.d",
     "object": "/Users/glennsmith/coding/GlennMsgVault/.build/arm64-apple-macosx/debug/MsgVaultUI.build/SetupWizard.swift.o",

@@ -298,23 +298,8 @@ class EmailStore: ObservableObject {
     }
     
     private func findMsgvault() {
-        // Check common install locations
-        let paths = [
-            "/usr/local/bin/msgvault",
-            "/opt/homebrew/bin/msgvault",
-            "\(NSHomeDirectory())/.local/bin/msgvault",
-            "\(NSHomeDirectory())/go/bin/msgvault"
-        ]
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
-                msgvaultPath = path
-                return
-            }
-        }
-        // Try which
-        if let result = try? runCommand("/usr/bin/which", arguments: ["msgvault"]),
-           !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            msgvaultPath = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let resolved = RuntimePaths.resolveBinaryPath("msgvault") {
+            msgvaultPath = resolved
         }
     }
     
@@ -330,9 +315,7 @@ class EmailStore: ObservableObject {
         process.standardError = outputPipe
         
         // Pass through environment including HOME for msgvault config
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = NSHomeDirectory()
-        process.environment = env
+        process.environment = RuntimePaths.processEnvironmentForUserHome()
         
         try process.run()
         
@@ -377,9 +360,7 @@ class EmailStore: ObservableObject {
             process.standardOutput = outputPipe
             process.standardError = outputPipe
             
-            var env = ProcessInfo.processInfo.environment
-            env["HOME"] = NSHomeDirectory()
-            process.environment = env
+            process.environment = RuntimePaths.processEnvironmentForUserHome()
             
             try process.run()
             
@@ -837,21 +818,7 @@ class EmailStore: ObservableObject {
     }()
     
     private func findOllamaBinaryPath() -> String? {
-        let paths = [
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-            "\(NSHomeDirectory())/.local/bin/ollama"
-        ]
-        for path in paths where FileManager.default.fileExists(atPath: path) {
-            return path
-        }
-        if let resolved = try? runCommand("/usr/bin/which", arguments: ["ollama"]) {
-            let trimmed = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return trimmed
-            }
-        }
-        return nil
+        RuntimePaths.resolveBinaryPath("ollama")
     }
     
     // All structural rules applied deterministically after Pass 1.

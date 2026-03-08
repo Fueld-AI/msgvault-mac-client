@@ -53,7 +53,7 @@ struct ContentView: View {
     }
 
     private var setupConfigPath: String {
-        "\(NSHomeDirectory())/.msgvault/config.toml"
+        "\(RuntimePaths.realUserHomePath())/.msgvault/config.toml"
     }
     
     var body: some View {
@@ -6377,9 +6377,7 @@ extension EmailStore {
         process.standardOutput = pipe
         process.standardError = pipe
         
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = NSHomeDirectory()
-        process.environment = env
+        process.environment = RuntimePaths.processEnvironmentForUserHome()
         
         try process.run()
         process.waitUntilExit()

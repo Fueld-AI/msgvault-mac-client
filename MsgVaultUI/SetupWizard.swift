@@ -86,7 +86,7 @@ final class SetupWizardStore: ObservableObject {
     private var lastPreconditions = Preconditions()
 
     private var msgvaultDirectoryURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        URL(fileURLWithPath: RuntimePaths.realUserHomePath(), isDirectory: true)
             .appendingPathComponent(".msgvault", isDirectory: true)
     }
 
@@ -500,22 +500,7 @@ final class SetupWizardStore: ObservableObject {
     }
 
     nonisolated private static func findMsgvaultBinaryPath() -> String? {
-        let candidates = [
-            "/usr/local/bin/msgvault",
-            "/opt/homebrew/bin/msgvault",
-            "\(NSHomeDirectory())/.local/bin/msgvault",
-            "\(NSHomeDirectory())/go/bin/msgvault"
-        ]
-        for path in candidates where FileManager.default.fileExists(atPath: path) {
-            return path
-        }
-        if let located = try? runSimpleCommand("/usr/bin/which", arguments: ["msgvault"]) {
-            let trimmed = located.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return trimmed
-            }
-        }
-        return nil
+        RuntimePaths.resolveBinaryPath("msgvault")
     }
 
     nonisolated private static func runSimpleCommand(_ command: String, arguments: [String]) throws -> String {
@@ -525,9 +510,7 @@ final class SetupWizardStore: ObservableObject {
         process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = pipe
-        var env = ProcessInfo.processInfo.environment
-        env["HOME"] = NSHomeDirectory()
-        process.environment = env
+        process.environment = RuntimePaths.processEnvironmentForUserHome()
         try process.run()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
@@ -565,9 +548,7 @@ final class SetupWizardStore: ObservableObject {
                 process.arguments = arguments
                 process.standardOutput = pipe
                 process.standardError = pipe
-                var env = ProcessInfo.processInfo.environment
-                env["HOME"] = NSHomeDirectory()
-                process.environment = env
+                process.environment = RuntimePaths.processEnvironmentForUserHome()
 
                 pipe.fileHandleForReading.readabilityHandler = { handle in
                     let data = handle.availableData
@@ -1029,14 +1010,10 @@ struct SetupWizardView: View {
                     .font(.subheadline)
             }
 
-            Text("curl -fsSL https://msgvault.io/install.sh | bash")
-                .font(.system(size: 12, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.black.opacity(0.82))
-                .foregroundStyle(.green)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+            commandSnippet(
+                "curl -fsSL https://msgvault.io/install.sh | bash",
+                textColor: .green
+            )
 
             HStack(spacing: 10) {
                 Button {
@@ -1055,10 +1032,6 @@ struct SetupWizardView: View {
                 .tint(accentColor)
                 .disabled(wizard.isRunningCommand)
 
-                Button("Copy command") {
-                    copyToClipboard("curl -fsSL https://msgvault.io/install.sh | bash")
-                }
-                .buttonStyle(.bordered)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -1276,7 +1249,7 @@ struct SetupWizardView: View {
 
             Text("""
 [oauth]
-client_secrets = "\(NSHomeDirectory())/.msgvault/client_secret.json"
+client_secrets = "\(RuntimePaths.realUserHomePath())/.msgvault/client_secret.json"
 
 [sync]
 rate_limit_qps = 5
@@ -1529,6 +1502,30 @@ rate_limit_qps = 5
     private func copyToClipboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func commandSnippet(_ command: String, textColor: Color = .white) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(command)
+                .font(.system(size: 12, design: .monospaced))
+                .textSelection(.enabled)
+                .foregroundStyle(textColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                copyToClipboard(command)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white.opacity(0.9))
+            .help("Copy command")
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func handleCredentialDrop(_ providers: [NSItemProvider]) -> Bool {
