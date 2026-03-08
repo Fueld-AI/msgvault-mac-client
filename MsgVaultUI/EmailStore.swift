@@ -7,6 +7,8 @@ struct EmailMessage: Identifiable, Hashable {
     let id: String
     let from: String
     let to: String
+    let cc: String
+    let bcc: String
     let subject: String
     let date: String
     let snippet: String
@@ -42,7 +44,21 @@ struct EmailMessage: Identifiable, Hashable {
         } else {
             toValue = json["to"] as? String ?? json["recipients"] as? String ?? ""
         }
-        
+
+        let ccValue: String
+        if let ccArray = json["cc_emails"] as? [String] {
+            ccValue = ccArray.joined(separator: ", ")
+        } else {
+            ccValue = json["cc"] as? String ?? ""
+        }
+
+        let bccValue: String
+        if let bccArray = json["bcc_emails"] as? [String] {
+            bccValue = bccArray.joined(separator: ", ")
+        } else {
+            bccValue = json["bcc"] as? String ?? ""
+        }
+
         let hasAttachment =
             (json["has_attachment"] as? Bool ?? false) ||
             (json["has_attachments"] as? Bool ?? false) ||
@@ -57,6 +73,8 @@ struct EmailMessage: Identifiable, Hashable {
             id: id,
             from: displayFrom,
             to: toValue,
+            cc: ccValue,
+            bcc: bccValue,
             subject: json["subject"] as? String ?? "(no subject)",
             date: json["sent_at"] as? String ?? json["date"] as? String ?? json["internal_date"] as? String ?? "",
             snippet: json["snippet"] as? String ?? json["body_preview"] as? String ?? "",
@@ -1502,6 +1520,8 @@ class EmailStore: ObservableObject {
                 id: "text-\(currentId)",
                 from: extractField(from: trimmed, field: "From:") ?? "",
                 to: extractField(from: trimmed, field: "To:") ?? "",
+                cc: extractField(from: trimmed, field: "CC:") ?? "",
+                bcc: extractField(from: trimmed, field: "BCC:") ?? "",
                 subject: extractField(from: trimmed, field: "Subject:") ?? trimmed,
                 date: extractDatePrefix(from: trimmed) ?? "",
                 snippet: trimmed,

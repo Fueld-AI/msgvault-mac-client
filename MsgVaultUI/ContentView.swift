@@ -1,6 +1,15 @@
 import SwiftUI
 import WebKit
 
+// MARK: - Label formatting helper
+/// Converts Gmail-style label keys to readable sentence case.
+/// "CATEGORY_UPDATES" → "Category updates", "INBOX" → "Inbox"
+func formatLabel(_ key: String) -> String {
+    let spaced = key.replacingOccurrences(of: "_", with: " ")
+    guard let first = spaced.first else { return spaced }
+    return first.uppercased() + spaced.dropFirst().lowercased()
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.colorScheme) private var colorScheme
@@ -187,6 +196,18 @@ struct SearchView: View {
     @State private var showLabelPickerPopover = false
     @State private var labelPickerSearchText = ""
     @State private var sortOption: SearchSortOption = .defaultOrder
+    @State private var resultFilter = ""
+    @State private var showResultFilters = false
+    @State private var resultFilterTo = ""
+    @State private var resultFilterCC = ""
+    @State private var resultFilterBCC = ""
+    @State private var resultFilterSubject = ""
+    @State private var resultFilterLabel = ""
+    @State private var resultFilterRelativeDate: RelativeDatePreset = .none
+    @State private var resultFilterSizePreset: SizePreset = .none
+    @State private var resultFilterAfterDate: Date?
+    @State private var resultFilterBeforeDate: Date?
+    @State private var resultFilterHasAttachment = false
     @StateObject private var speechInput = SpeechInputManager()
     
     private var hasActiveFilters: Bool {
@@ -543,12 +564,138 @@ struct SearchView: View {
         selectedAccountEmail = ""
         translatedQueryPreview = nil
         translatedQueryJSONPreview = nil
+        resultFilter = ""
+        resultFilterTo = ""
+        resultFilterCC = ""
+        resultFilterBCC = ""
+        resultFilterSubject = ""
+        resultFilterLabel = ""
+        resultFilterRelativeDate = .none
+        resultFilterSizePreset = .none
+        resultFilterAfterDate = nil
+        resultFilterBeforeDate = nil
+        resultFilterHasAttachment = false
+        showResultFilters = false
         store.searchResults = []
         store.errorMessage = nil
     }
     
+    private static let resultFilterDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+    private static let resultFilterIsoFull = ISO8601DateFormatter()
+    private static let resultFilterIsoFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private func resultFilterMessageDate(_ raw: String) -> Date {
+        if let d = Self.resultFilterIsoFrac.date(from: raw) { return d }
+        if let d = Self.resultFilterIsoFull.date(from: raw) { return d }
+        if let d = Self.resultFilterDateFormatter.date(from: raw) { return d }
+        return .distantPast
+    }
+
     private var displayedResults: [EmailMessage] {
-        sortMessages(store.searchResults, option: sortOption)
+        var results = sortMessages(store.searchResults, option: sortOption)
+
+        let term = resultFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !term.isEmpty {
+            let terms = term.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+            results = results.filter { msg in
+                let haystack = "\(msg.from) \(msg.to) \(msg.subject) \(msg.snippet) \(msg.labels.joined(separator: " "))".lowercased()
+                return terms.allSatisfy { haystack.contains($0) }
+            }
+        }
+
+        let to = resultFilterTo.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !to.isEmpty { results = results.filter { $0.to.lowercased().contains(to) } }
+
+        let cc = resultFilterCC.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !cc.isEmpty { results = results.filter { $0.cc.lowercased().contains(cc) } }
+
+        let bcc = resultFilterBCC.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !bcc.isEmpty { results = results.filter { $0.bcc.lowercased().contains(bcc) } }
+
+        let subj = resultFilterSubject.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !subj.isEmpty { results = results.filter { $0.subject.lowercased().contains(subj) } }
+
+        let lbl = resultFilterLabel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !lbl.isEmpty { results = results.filter { $0.labels.contains { $0.lowercased() == lbl } } }
+
+        if let token = resultFilterRelativeDate.queryToken {
+            // e.g. "newer_than:7d" → compute cutoff date
+            let parts = token.replacingOccurrences(of: "newer_than:", with: "").lowercased()
+            let num = Int(parts.dropLast()) ?? 0
+            let unit = parts.last ?? "d"
+            var comps = DateComponents()
+            switch unit {
+            case "d": comps.day   = -num
+            case "w": comps.day   = -num * 7
+            case "m": comps.month = -num
+            case "y": comps.year  = -num
+            default: break
+            }
+            if let cutoff = Calendar.current.date(byAdding: comps, to: Date()) {
+                results = results.filter { resultFilterMessageDate($0.date) >= cutoff }
+            }
+        }
+
+        if let token = resultFilterSizePreset.queryToken {
+            // Parse larger:/smaller: token against sizeEstimate
+            let isLarger = token.hasPrefix("larger:")
+            let valueStr = token.replacingOccurrences(of: "larger:", with: "").replacingOccurrences(of: "smaller:", with: "").uppercased()
+            let multiplier: Int = valueStr.hasSuffix("M") ? 1_000_000 : 1_000
+            if let num = Int(valueStr.dropLast()) {
+                let bytes = num * multiplier
+                results = results.filter { isLarger ? $0.sizeEstimate >= bytes : $0.sizeEstimate <= bytes }
+            }
+        }
+
+        if let after = resultFilterAfterDate {
+            results = results.filter { resultFilterMessageDate($0.date) >= after }
+        }
+        if let before = resultFilterBeforeDate {
+            results = results.filter { resultFilterMessageDate($0.date) <= before }
+        }
+        if resultFilterHasAttachment {
+            results = results.filter { $0.hasAttachment }
+        }
+
+        return results
+    }
+
+    private var resultFilterIsActive: Bool {
+        !resultFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        resultFilterAdvancedActive
+    }
+
+    private var resultFilterAdvancedActive: Bool {
+        !resultFilterTo.isEmpty || !resultFilterCC.isEmpty || !resultFilterBCC.isEmpty ||
+        !resultFilterSubject.isEmpty || !resultFilterLabel.isEmpty ||
+        resultFilterRelativeDate != .none || resultFilterSizePreset != .none ||
+        resultFilterAfterDate != nil || resultFilterBeforeDate != nil ||
+        resultFilterHasAttachment
+    }
+
+    /// Labels derived from the current search result set, sorted by frequency.
+    /// Used to populate the label picker with only labels present in results.
+    private var labelsFromResults: [LabelInfo] {
+        var counts: [String: Int] = [:]
+        for msg in store.searchResults {
+            for label in msg.labels {
+                counts[label, default: 0] += 1
+            }
+        }
+        return counts
+            .map { LabelInfo(key: $0.key, count: $0.value) }
+            .sorted { $0.count > $1.count }
     }
     
     private static func loadRecentQueries() -> [String] {
@@ -1090,7 +1237,11 @@ struct SearchView: View {
                         
                         HStack(spacing: 12) {
                             FilterField(label: "Subject", placeholder: "meeting notes", text: $filterSubject, icon: "text.alignleft")
-                            FilterFieldLabelPicker(selectedLabel: $filterLabel, onSelect: { scheduleDebouncedSearch() })
+                            FilterFieldLabelPicker(
+                                selectedLabel: $filterLabel,
+                                onSelect: { scheduleDebouncedSearch() },
+                                resultLabels: store.searchResults.isEmpty ? nil : labelsFromResults
+                            )
                         }
                         
                         HStack(spacing: 12) {
@@ -1220,11 +1371,171 @@ struct SearchView: View {
                         }
                         Spacer()
                     } else {
+                        // ── Secondary in-results filter bar ──────────────────
+                        VStack(spacing: 0) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "line.3.horizontal.decrease")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(resultFilterIsActive ? accentColor : .secondary)
+                                TextField("Filter these results…", text: $resultFilter)
+                                    .textFieldStyle(.plain)
+                                    .font(.callout)
+                                if resultFilterIsActive {
+                                    Button {
+                                        resultFilter = ""
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                // Advanced filter toggle
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.18)) {
+                                        showResultFilters.toggle()
+                                    }
+                                } label: {
+                                    ZStack(alignment: .topTrailing) {
+                                        Image(systemName: showResultFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                                            .font(.system(size: 15, weight: .medium))
+                                            .foregroundStyle((showResultFilters || resultFilterAdvancedActive) ? accentColor : .secondary)
+                                        if resultFilterAdvancedActive {
+                                            Circle()
+                                                .fill(accentColor)
+                                                .frame(width: 6, height: 6)
+                                                .offset(x: 4, y: -4)
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .help("Advanced result filters — CC, BCC, Label")
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+
+                            // Advanced filter panel — mirrors Sender Search filter panel
+                            if showResultFilters {
+                                VStack(spacing: 12) {
+                                    Divider().opacity(0.5)
+
+                                    HStack(spacing: 12) {
+                                        FilterField(label: "To", placeholder: "recipient@example.com", text: $resultFilterTo, icon: "person.2")
+                                        FilterField(label: "CC", placeholder: "team@example.com", text: $resultFilterCC, icon: "person.3")
+                                    }
+
+                                    HStack(spacing: 12) {
+                                        FilterField(label: "BCC", placeholder: "archive@example.com", text: $resultFilterBCC, icon: "person.crop.circle.badge.checkmark")
+                                        FilterField(label: "Subject", placeholder: "meeting notes", text: $resultFilterSubject, icon: "text.alignleft")
+                                    }
+
+                                    HStack(spacing: 12) {
+                                        FilterFieldLabelPicker(
+                                            selectedLabel: $resultFilterLabel,
+                                            resultLabels: labelsFromResults.isEmpty ? nil : labelsFromResults
+                                        )
+                                        Picker("Quick Date", selection: $resultFilterRelativeDate) {
+                                            ForEach(RelativeDatePreset.allCases) { preset in
+                                                Text(preset.label).tag(preset)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+
+                                    HStack(spacing: 12) {
+                                        Picker("Size", selection: $resultFilterSizePreset) {
+                                            ForEach(SizePreset.allCases) { preset in
+                                                Text(preset.label).tag(preset)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        Spacer()
+                                    }
+
+                                    CompactDateAttachmentBar(
+                                        afterDate: $resultFilterAfterDate,
+                                        beforeDate: $resultFilterBeforeDate,
+                                        hasAttachment: $resultFilterHasAttachment
+                                    )
+
+                                    if resultFilterAdvancedActive {
+                                        HStack {
+                                            Spacer()
+                                            Button("Clear filters") {
+                                                resultFilterTo = ""
+                                                resultFilterCC = ""
+                                                resultFilterBCC = ""
+                                                resultFilterSubject = ""
+                                                resultFilterLabel = ""
+                                                resultFilterRelativeDate = .none
+                                                resultFilterSizePreset = .none
+                                                resultFilterAfterDate = nil
+                                                resultFilterBeforeDate = nil
+                                                resultFilterHasAttachment = false
+                                            }
+                                            .font(.caption)
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(accentColor)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.bottom, 12)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+
+                            // Quick-access label chips from result set
+                            if !labelsFromResults.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 6) {
+                                        ForEach(labelsFromResults.prefix(20)) { label in
+                                            let isActive = resultFilterLabel.lowercased() == label.key.lowercased()
+                                            Button {
+                                                resultFilterLabel = isActive ? "" : label.key
+                                            } label: {
+                                                HStack(spacing: 4) {
+                                                    Text(formatLabel(label.key))
+                                                        .font(.system(size: 10, weight: .semibold))
+                                                    Text("\(label.count)")
+                                                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                                        .foregroundStyle(isActive ? .white.opacity(0.8) : accentColor.opacity(0.7))
+                                                }
+                                                .foregroundStyle(isActive ? .white : accentColor)
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 3)
+                                                .background(Capsule().fill(isActive ? accentColor.opacity(0.85) : accentColor.opacity(0.10)))
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.bottom, 7)
+                                }
+                            }
+                        }
+                        .background(resultFilterIsActive ? accentColor.opacity(0.06) : Color(NSColor.controlBackgroundColor))
+                        .overlay(
+                            Rectangle()
+                                .frame(height: 1)
+                                .foregroundStyle(resultFilterIsActive ? accentColor.opacity(0.25) : Color.primary.opacity(0.06)),
+                            alignment: .bottom
+                        )
+
                         // Sort / count bar — only visible with results
                         HStack(spacing: 10) {
-                            Text("\(displayedResults.count) message\(displayedResults.count == 1 ? "" : "s")")
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(.secondary)
+                            Group {
+                                if resultFilterIsActive {
+                                    Text("\(displayedResults.count) of \(store.searchResults.count)")
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(accentColor)
+                                } else {
+                                    Text("\(displayedResults.count) message\(displayedResults.count == 1 ? "" : "s")")
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             Spacer()
                             Menu {
                                 Picker("Sort", selection: $sortOption) {
@@ -1270,15 +1581,37 @@ struct SearchView: View {
 
                         Divider()
 
-                        List(displayedResults, selection: $selectedMessageId) { message in
-                            MessageRowView(message: message)
-                                .tag(message.id)
-                        }
-                        .listStyle(.inset)
-                        .onChange(of: selectedMessageId) { _, newId in
-                            if let id = newId {
-                                store.selectedMessage = displayedResults.first(where: { $0.id == id })
-                                Task { await store.loadMessageDetail(id: id) }
+                        if displayedResults.isEmpty && resultFilterIsActive {
+                            Spacer()
+                            VStack(spacing: 10) {
+                                Image(systemName: "line.3.horizontal.decrease")
+                                    .font(.system(size: 32))
+                                    .foregroundStyle(.tertiary)
+                                Text("No matches in these results")
+                                    .font(.headline)
+                                    .foregroundStyle(.secondary)
+                                Text("Try different filter words, or clear the filter to see all \(store.searchResults.count) results.")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: 240)
+                                Button("Clear filter") { resultFilter = "" }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .tint(accentColor)
+                            }
+                            Spacer()
+                        } else {
+                            List(displayedResults, selection: $selectedMessageId) { message in
+                                MessageRowView(message: message)
+                                    .tag(message.id)
+                            }
+                            .listStyle(.inset)
+                            .onChange(of: selectedMessageId) { _, newId in
+                                if let id = newId {
+                                    store.selectedMessage = displayedResults.first(where: { $0.id == id })
+                                    Task { await store.loadMessageDetail(id: id) }
+                                }
                             }
                         }
                     }
@@ -2049,6 +2382,9 @@ private struct LabelPickerPopoverContent: View {
     @Binding var selectedLabel: String
     @Binding var searchText: String
     var onSelect: (String) -> Void
+    /// When non-nil, shows only these labels (derived from current result set).
+    /// When nil, falls back to the full store.availableLabels archive list.
+    var resultLabels: [LabelInfo]? = nil
 
     @EnvironmentObject var store: EmailStore
     @Environment(\.appAccentColor) private var accentColor
@@ -2057,11 +2393,17 @@ private struct LabelPickerPopoverContent: View {
     private let visibleRows = 10
     private let rowHeight: CGFloat = 34
 
+    private var sourceLabels: [LabelInfo] {
+        resultLabels ?? store.availableLabels
+    }
+
     private var filteredLabels: [LabelInfo] {
         searchText.isEmpty
-            ? store.availableLabels
-            : store.availableLabels.filter { $0.key.localizedCaseInsensitiveContains(searchText) }
+            ? sourceLabels
+            : sourceLabels.filter { $0.key.localizedCaseInsensitiveContains(searchText) }
     }
+
+    private var isUsingResultScope: Bool { resultLabels != nil }
 
     private var listViewportHeight: CGFloat {
         CGFloat(visibleRows) * rowHeight + 8
@@ -2072,34 +2414,36 @@ private struct LabelPickerPopoverContent: View {
             // Search bar
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.78))
                 TextField("", text: $searchText, prompt: Text("Filter labels…").foregroundStyle(.white.opacity(0.70)))
                     .textFieldStyle(.plain)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white)
                 if !searchText.isEmpty {
                     Button { searchText = "" } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.80))
                     }
                     .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
             .background(Color.black.opacity(colorScheme == .dark ? 0.18 : 0.14))
 
             Divider().overlay(Color.white.opacity(0.18))
 
-            if store.isLoadingLabels {
+            if !isUsingResultScope && store.isLoadingLabels {
                 ProgressView()
                     .tint(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                     .frame(height: listViewportHeight)
             } else if filteredLabels.isEmpty {
-                Text(searchText.isEmpty ? "No labels found" : "No match for \"\(searchText)\"")
+                Text(searchText.isEmpty
+                     ? (isUsingResultScope ? "No labels in these results" : "No labels found")
+                     : "No match for \"\(searchText)\"")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.78))
                     .padding(.horizontal, 16)
@@ -2116,16 +2460,16 @@ private struct LabelPickerPopoverContent: View {
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: selectedLabel == label.key ? "checkmark" : "tag")
-                                        .font(.system(size: 12, weight: selectedLabel == label.key ? .bold : .regular))
+                                        .font(.system(size: 11, weight: selectedLabel == label.key ? .bold : .regular))
                                         .foregroundStyle(.white.opacity(selectedLabel == label.key ? 1.0 : 0.68))
-                                        .frame(width: 16)
-                                    Text(label.key)
-                                        .font(.system(size: 14, weight: selectedLabel == label.key ? .semibold : .medium))
+                                        .frame(width: 14)
+                                    Text(formatLabel(label.key))
+                                        .font(.system(size: 12, weight: selectedLabel == label.key ? .semibold : .medium))
                                         .foregroundStyle(.white)
                                         .lineLimit(1)
                                     Spacer(minLength: 12)
                                     Text(label.count.formatted())
-                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                         .foregroundStyle(.white.opacity(0.88))
                                         .padding(.horizontal, 7)
                                         .padding(.vertical, 3)
@@ -2172,6 +2516,8 @@ private struct LabelPickerPopoverContent: View {
 private struct FilterFieldLabelPicker: View {
     @Binding var selectedLabel: String
     var onSelect: (() -> Void)? = nil
+    /// When provided, the picker shows only labels present in the current result set.
+    var resultLabels: [LabelInfo]? = nil
 
     @EnvironmentObject var store: EmailStore
     @Environment(\.colorScheme) private var colorScheme
@@ -2251,7 +2597,8 @@ private struct FilterFieldLabelPicker: View {
                         searchText = ""
                         showPicker = false
                         onSelect?()
-                    }
+                    },
+                    resultLabels: resultLabels
                 )
             }
         }
@@ -2458,7 +2805,7 @@ struct MessageRowView: View {
                         .foregroundStyle(accentColor)
                 }
                 ForEach(message.labels.prefix(3), id: \.self) { label in
-                    Text(label)
+                    Text(formatLabel(label))
                         .font(.caption2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -2471,11 +2818,22 @@ struct MessageRowView: View {
         .padding(.vertical, 4)
     }
     
+    private static let isoFull = ISO8601DateFormatter()
+    private static let isoFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let displayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_GB")
+        f.dateFormat = "EEE, dd-MMM-yy HH:mm"  // e.g. Sat, 08-Mar-26 14:30
+        return f
+    }()
+
     private func formatDate(_ dateStr: String) -> String {
-        // Try to make the date more readable
-        if dateStr.count > 10 {
-            return String(dateStr.prefix(10))
-        }
+        if let d = Self.isoFrac.date(from: dateStr) { return Self.displayFormatter.string(from: d) }
+        if let d = Self.isoFull.date(from: dateStr) { return Self.displayFormatter.string(from: d) }
         return dateStr
     }
 }
@@ -2486,55 +2844,111 @@ struct MessageDetailView: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.appAccentColor) private var accentColor
 
+    private static let isoFull = ISO8601DateFormatter()
+    private static let isoFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let displayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_GB")
+        f.dateFormat = "EEE, dd-MMM-yy HH:mm"
+        return f
+    }()
+
+    private func formatDate(_ raw: String) -> String {
+        if let d = Self.isoFrac.date(from: raw) { return Self.displayFormatter.string(from: d) }
+        if let d = Self.isoFull.date(from: raw) { return Self.displayFormatter.string(from: d) }
+        return raw
+    }
+
     var body: some View {
         if let message = store.selectedMessage {
             VStack(alignment: .leading, spacing: 12) {
                 // Header
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     Text(message.subject)
                         .font(.title2.bold())
-                    
-                    HStack(spacing: 16) {
+
+                    // From + Date row
+                    HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("From")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Text(message.from)
-                                .font(.body)
+                                .font(.subheadline)
+                                .textSelection(.enabled)
                         }
-                        
-                        if !message.to.isEmpty {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("To")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(message.to)
-                                    .font(.body)
-                                    .lineLimit(2)
-                            }
-                        }
-                        
                         Spacer()
-                        
                         VStack(alignment: .trailing, spacing: 2) {
                             Text("Date")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Text(message.date)
-                                .font(.body)
+                            Text(formatDate(message.date))
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
                         }
                     }
-                    
+
+                    // To / CC / BCC grid
+                    if !message.to.isEmpty || !message.cc.isEmpty || !message.bcc.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if !message.to.isEmpty {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("To")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 24, alignment: .trailing)
+                                    Text(message.to)
+                                        .font(.caption)
+                                        .foregroundStyle(.primary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            if !message.cc.isEmpty {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("CC")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 24, alignment: .trailing)
+                                    Text(message.cc)
+                                        .font(.caption)
+                                        .foregroundStyle(.primary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            if !message.bcc.isEmpty {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("BCC")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 24, alignment: .trailing)
+                                    Text(message.bcc)
+                                        .font(.caption)
+                                        .foregroundStyle(accentColor.opacity(0.85))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+
                     if !message.labels.isEmpty {
-                        HStack(spacing: 4) {
-                            ForEach(message.labels, id: \.self) { label in
-                                Text(label)
-                                    .font(.caption)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(accentColor.opacity(0.12))
-                                    .foregroundStyle(accentColor)
-                                    .clipShape(Capsule())
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 4) {
+                                ForEach(message.labels, id: \.self) { label in
+                                    Text(formatLabel(label))
+                                        .font(.caption)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(accentColor.opacity(0.12))
+                                        .foregroundStyle(accentColor)
+                                        .clipShape(Capsule())
+                                }
                             }
                         }
                     }
@@ -2847,7 +3261,7 @@ struct SendersView: View {
                                                 .stroke(accentColor.opacity(0.35), lineWidth: 1)
                                         )
                                         .shadow(color: accentColor.opacity(0.25), radius: 3, y: 1)
-                                        .offset(x: 8, y: -6)
+                                        .offset(x: 14, y: -12)
                                 }
                             }
                     }
@@ -3119,6 +3533,20 @@ struct SenderDetailPanel: View {
         }
     }
 
+    /// Labels present in the current visible message set, sorted by frequency.
+    /// Used to scope the label picker to only what's relevant for this sender/filter combo.
+    private var labelsFromCurrentMessages: [LabelInfo] {
+        var counts: [String: Int] = [:]
+        for msg in sourceMessages {
+            for label in msg.labels {
+                counts[label, default: 0] += 1
+            }
+        }
+        return counts
+            .map { LabelInfo(key: $0.key, count: $0.value) }
+            .sorted { $0.count > $1.count }
+    }
+
     /// Returns an `AttributedString` with every occurrence of `keyword` highlighted.
     private func highlighted(
         _ text: String,
@@ -3279,7 +3707,11 @@ struct SenderDetailPanel: View {
                         }
 
                         HStack(spacing: 12) {
-                            FilterFieldLabelPicker(selectedLabel: $filterLabel, onSelect: { scheduleRemoteFilterSearchIfNeeded() })
+                            FilterFieldLabelPicker(
+                                selectedLabel: $filterLabel,
+                                onSelect: { scheduleRemoteFilterSearchIfNeeded() },
+                                resultLabels: allMessages.isEmpty ? nil : labelsFromCurrentMessages
+                            )
 
                             Picker("Quick Date", selection: $filterRelativeDate) {
                                 ForEach(SenderRelativeDatePreset.allCases) { preset in
