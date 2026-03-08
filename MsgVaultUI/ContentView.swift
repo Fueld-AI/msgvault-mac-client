@@ -1456,23 +1456,50 @@ struct SearchView: View {
                     } else {
                         // ── Secondary in-results filter bar ──────────────────
                         VStack(spacing: 0) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "line.3.horizontal.decrease")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(resultFilterIsActive ? accentColor : .secondary)
-                                TextField("Filter these results…", text: $resultFilter)
-                                    .textFieldStyle(.plain)
-                                    .font(.callout)
-                                if resultFilterIsActive {
-                                    Button {
-                                        resultFilter = ""
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                            let lowerFilterIsHighlighted = resultFilterIsActive || showResultFilters || resultFilterAdvancedActive
+                            HStack(spacing: 10) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(lowerFilterIsHighlighted ? accentColor : .secondary)
+                                    TextField("Search these results…", text: $resultFilter)
+                                        .textFieldStyle(.plain)
+                                        .font(.callout)
+                                    if resultFilterIsActive {
+                                        Button {
+                                            resultFilter = ""
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
-                                    .buttonStyle(.plain)
                                 }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(Color(NSColor.controlBackgroundColor))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .strokeBorder(
+                                            lowerFilterIsHighlighted
+                                                ? accentColor.opacity(0.50)
+                                                : Color.primary.opacity(0.12),
+                                            lineWidth: lowerFilterIsHighlighted ? 1.2 : 1
+                                        )
+                                )
+                                .shadow(
+                                    color: lowerFilterIsHighlighted
+                                        ? accentColor.opacity(0.18)
+                                        : .black.opacity(0.05),
+                                    radius: lowerFilterIsHighlighted ? 8 : 6,
+                                    x: 0,
+                                    y: 2
+                                )
+
                                 // Advanced filter toggle
                                 Button {
                                     withAnimation(.easeInOut(duration: 0.18)) {
@@ -1482,20 +1509,45 @@ struct SearchView: View {
                                     ZStack(alignment: .topTrailing) {
                                         Image(systemName: showResultFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                                             .font(.system(size: 15, weight: .medium))
-                                            .foregroundStyle((showResultFilters || resultFilterAdvancedActive) ? accentColor : .secondary)
+                                            .foregroundStyle((showResultFilters || resultFilterAdvancedActive) ? .white : .secondary)
                                         if resultFilterAdvancedActive {
                                             Circle()
-                                                .fill(accentColor)
+                                                .fill(Color.white.opacity(0.95))
                                                 .frame(width: 6, height: 6)
                                                 .offset(x: 4, y: -4)
                                         }
                                     }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill((showResultFilters || resultFilterAdvancedActive)
+                                                  ? LinearGradient(
+                                                      colors: [accentColor.opacity(0.92), accentColor.opacity(0.78)],
+                                                      startPoint: .topLeading,
+                                                      endPoint: .bottomTrailing
+                                                  )
+                                                  : LinearGradient(
+                                                      colors: [Color(NSColor.controlBackgroundColor), Color(NSColor.controlBackgroundColor)],
+                                                      startPoint: .topLeading,
+                                                      endPoint: .bottomTrailing
+                                                  ))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .strokeBorder(
+                                                (showResultFilters || resultFilterAdvancedActive)
+                                                    ? accentColor.opacity(0.36)
+                                                    : Color.primary.opacity(0.10),
+                                                lineWidth: 1
+                                            )
+                                    )
                                 }
                                 .buttonStyle(.plain)
                                 .help("Advanced result filters — CC, BCC, Label")
                             }
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
+                            .padding(.vertical, 8)
 
                             // Advanced filter panel — mirrors Sender Search filter panel
                             if showResultFilters {
