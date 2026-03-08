@@ -175,7 +175,6 @@ struct SearchView: View {
     @State private var filterSizePreset: SizePreset = .none
     @State private var filterHasAttachment = false
     @State private var filterLabel = ""
-    @State private var selectedAccountEmail = ""
     @State private var searchScope: SearchScope = .everything
     @State private var aiAssistEnabled = true
     @State private var translatedQueryPreview: String?
@@ -184,19 +183,21 @@ struct SearchView: View {
     @State private var debounceTask: Task<Void, Never>?
     @State private var isTranslatingQuery = false
     @State private var showFilters = false
+    @State private var showTagPicker = false
+    @State private var tagSearchText = ""
     @State private var sortOption: SearchSortOption = .defaultOrder
     @StateObject private var speechInput = SpeechInputManager()
     
     private var hasActiveFilters: Bool {
         !filterFrom.isEmpty || !filterTo.isEmpty || !filterCC.isEmpty || !filterBCC.isEmpty || !filterSubject.isEmpty ||
         filterAfterDate != nil || filterBeforeDate != nil || filterRelativeDate != .none || filterSizePreset != .none ||
-        filterHasAttachment || !filterLabel.isEmpty || !selectedAccountEmail.isEmpty
+        filterHasAttachment || !filterLabel.isEmpty
     }
     
     private var activeFilterCount: Int {
         [!filterFrom.isEmpty, !filterTo.isEmpty, !filterCC.isEmpty, !filterBCC.isEmpty, !filterSubject.isEmpty,
          filterAfterDate != nil, filterBeforeDate != nil, filterRelativeDate != .none,
-         filterSizePreset != .none, filterHasAttachment, !filterLabel.isEmpty, !selectedAccountEmail.isEmpty]
+         filterSizePreset != .none, filterHasAttachment, !filterLabel.isEmpty]
             .filter { $0 }.count
     }
     
@@ -356,8 +357,6 @@ struct SearchView: View {
     private func buildSearchPlan(keywordOverride: String? = nil) -> SearchPlan {
         var parts: [String] = []
         var localFilter = SearchLocalFilter()
-        let accountFilter = selectedAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        
         let fromFilter = filterFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         if !fromFilter.isEmpty {
             localFilter.fromContains = fromFilter
@@ -433,7 +432,7 @@ struct SearchView: View {
         return SearchPlan(
             query: parts.joined(separator: " "),
             localFilter: localFilter,
-            accountEmail: accountFilter.isEmpty ? nil : accountFilter
+            accountEmail: nil
         )
     }
     
@@ -515,7 +514,6 @@ struct SearchView: View {
         filterSizePreset = .none
         filterHasAttachment = false
         filterLabel = ""
-        selectedAccountEmail = ""
         translatedQueryPreview = nil
         translatedQueryJSONPreview = nil
         store.searchResults = []
@@ -560,7 +558,6 @@ struct SearchView: View {
         filterSizePreset = .none
         filterHasAttachment = false
         filterLabel = ""
-        selectedAccountEmail = ""
     }
     
     private func makeOperatorToken(prefix: String, value: String) -> String {
@@ -677,40 +674,52 @@ struct SearchView: View {
                     )
                     .help("Limit the top search bar to specific fields")
 
-                    if !store.accounts.isEmpty {
-                        Menu {
-                            Button("All accounts") { selectedAccountEmail = "" }
-                            Divider()
-                            ForEach(store.accounts) { account in
-                                Button(account.email) { selectedAccountEmail = account.email }
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(selectedAccountEmail.isEmpty ? "All accounts" : selectedAccountEmail)
-                                    .font(.caption.weight(.semibold))
-                                    .lineLimit(1)
-                                Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 8, weight: .semibold))
-                            }
-                            .foregroundStyle(selectedAccountEmail.isEmpty ? .primary : accentColor)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .fill(selectedAccountEmail.isEmpty
-                                          ? Color(NSColor.controlBackgroundColor)
-                                          : accentColor.opacity(0.12))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                    .strokeBorder(selectedAccountEmail.isEmpty
-                                                  ? Color.primary.opacity(0.08)
-                                                  : accentColor.opacity(0.30), lineWidth: 1)
-                            )
+                    // Label picker button
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showTagPicker.toggle()
                         }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help("Run search in one account or all accounts")
+                        if showTagPicker && store.availableLabels.isEmpty {
+                            Task { await store.fetchLabels() }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(filterLabel.isEmpty ? "Label" : filterLabel)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Image(systemName: showTagPicker ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                        .foregroundStyle((filterLabel.isEmpty && !showTagPicker) ? .primary : accentColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill((filterLabel.isEmpty && !showTagPicker)
+                                      ? Color(NSColor.controlBackgroundColor)
+                                      : accentColor.opacity(0.12))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder((filterLabel.isEmpty && !showTagPicker)
+                                              ? Color.primary.opacity(0.08)
+                                              : accentColor.opacity(0.30), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Filter by Gmail label")
+
+                    if !filterLabel.isEmpty {
+                        Button {
+                            filterLabel = ""
+                            withAnimation(.easeInOut(duration: 0.15)) { showTagPicker = false }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear label filter")
                     }
 
                     Spacer()
@@ -862,6 +871,108 @@ struct SearchView: View {
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
                 .padding(.bottom, 6)
+
+                // Label picker panel
+                if showTagPicker {
+                    VStack(spacing: 0) {
+                        // Prominent search bar at the top
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            TextField("Filter labels…", text: $tagSearchText)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 14, weight: .medium))
+                            if !tagSearchText.isEmpty {
+                                Button { tagSearchText = "" } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color(NSColor.textBackgroundColor))
+
+                        Divider()
+
+                        if store.isLoadingLabels {
+                            HStack(spacing: 6) {
+                                ProgressView().scaleEffect(0.75)
+                                Text("Loading labels…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 24)
+                        } else {
+                            let filteredLabels = tagSearchText.isEmpty
+                                ? store.availableLabels
+                                : store.availableLabels.filter {
+                                    $0.key.localizedCaseInsensitiveContains(tagSearchText)
+                                }
+
+                            if filteredLabels.isEmpty {
+                                Text("No labels match \"\(tagSearchText)\"")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 24)
+                            } else {
+                                ScrollView {
+                                    LazyVStack(spacing: 0) {
+                                        ForEach(filteredLabels) { label in
+                                            Button {
+                                                filterLabel = label.key
+                                                tagSearchText = ""
+                                                withAnimation(.easeInOut(duration: 0.15)) {
+                                                    showTagPicker = false
+                                                }
+                                                performSearch()
+                                            } label: {
+                                                HStack {
+                                                    Text(label.key)
+                                                        .font(.system(size: 11))
+                                                        .foregroundStyle(filterLabel == label.key ? accentColor : .primary)
+                                                    Spacer()
+                                                    Text("\(label.count)")
+                                                        .font(.system(size: 10))
+                                                        .foregroundStyle(.secondary)
+                                                        .padding(.horizontal, 5)
+                                                        .padding(.vertical, 2)
+                                                        .background(Color.primary.opacity(0.06))
+                                                        .clipShape(Capsule())
+                                                }
+                                                .padding(.horizontal, 12)
+                                                .padding(.vertical, 6)
+                                                .background(filterLabel == label.key
+                                                            ? accentColor.opacity(0.08)
+                                                            : Color.clear)
+                                                .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
+
+                                            Divider().opacity(0.4).padding(.leading, 12)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 220)
+                            }
+                        }
+                    }
+                    .background(Color(NSColor.windowBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.08), radius: 6, x: 0, y: 3)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 6)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
                 
                 HStack(spacing: 12) {
                     HStack(spacing: 10) {
@@ -1181,12 +1292,13 @@ struct SearchView: View {
         .onChange(of: filterSizePreset) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: filterHasAttachment) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: filterLabel) { _, _ in scheduleDebouncedSearch() }
-        .onChange(of: selectedAccountEmail) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: store.searchForSenderRequest) { _, request in
-            guard let senderEmail = request else { return }
+            guard let req = request else { return }
             store.searchForSenderRequest = nil
             clearAll()
-            filterFrom = senderEmail
+            filterFrom = req.senderEmail
+            let kw = req.additionalKeywords.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !kw.isEmpty { searchKeywords = kw }
             showFilters = true
             performSearch()
         }
@@ -1231,7 +1343,6 @@ struct SearchView: View {
                 }
                 if filterHasAttachment { filterChip("has:attachment") { filterHasAttachment = false } }
                 if !filterLabel.isEmpty { filterChip("label:\(filterLabel)") { filterLabel = "" } }
-                if !selectedAccountEmail.isEmpty { filterChip("account:\(selectedAccountEmail)") { selectedAccountEmail = "" } }
             }
         }
     }
@@ -2319,6 +2430,12 @@ struct SenderDetailPanel: View {
     @Binding var detailFilter: String
     let isLocked: Bool
 
+    // Local selected-message state (independent of the shared SearchView state)
+    @State private var selectedMessage: EmailMessage?
+    @State private var localMessageDetail: String = ""
+    @State private var localMessageDetailHTML: String?
+    @State private var isLoadingDetail = false
+
     private static let isoDateFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
@@ -2379,134 +2496,302 @@ struct SenderDetailPanel: View {
         }
     }
 
+    /// Returns an `AttributedString` with every occurrence of `keyword` highlighted.
+    private func highlighted(
+        _ text: String,
+        keyword: String,
+        baseFontSize: CGFloat = 13,
+        bold: Bool = false
+    ) -> AttributedString {
+        var result = AttributedString(text)
+        var baseFont = Font.system(size: baseFontSize)
+        if bold { baseFont = baseFont.bold() }
+        result.font = baseFont
+
+        let lowText = text.lowercased()
+        let lowKW   = keyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lowKW.isEmpty else { return result }
+
+        var searchFrom = lowText.startIndex
+        while let range = lowText.range(of: lowKW, range: searchFrom..<lowText.endIndex) {
+            let startOffset = lowText.distance(from: lowText.startIndex, to: range.lowerBound)
+            let endOffset   = lowText.distance(from: lowText.startIndex, to: range.upperBound)
+            let attrStart = result.index(result.startIndex, offsetByCharacters: startOffset)
+            let attrEnd   = result.index(result.startIndex, offsetByCharacters: endOffset)
+            result[attrStart..<attrEnd].backgroundColor = .yellow.opacity(0.45)
+            result[attrStart..<attrEnd].foregroundColor = .primary
+            result[attrStart..<attrEnd].font = bold
+                ? .system(size: baseFontSize, weight: .bold)
+                : .system(size: baseFontSize, weight: .semibold)
+            searchFrom = range.upperBound
+        }
+        return result
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(sender.name)
-                            .font(.title3.bold())
-                            .lineLimit(1)
-                        if !isLocked {
-                            Text("(hover preview)")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+        HStack(spacing: 0) {
+            // Left column: header + filter bar + email list
+            VStack(spacing: 0) {
+                // Header
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(sender.name)
+                                .font(.title3.bold())
+                                .lineLimit(1)
+                            if !isLocked {
+                                Text("(preview)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        if sender.email != sender.name {
+                            Text(sender.email)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    if sender.email != sender.name {
-                        Text(sender.email)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    Spacer()
+                    if !allMessages.isEmpty {
+                        Text("\(filteredMessages.count == allMessages.count ? "\(allMessages.count)" : "\(filteredMessages.count)/\(allMessages.count)") msgs")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(accentColor.opacity(0.12))
+                            .clipShape(Capsule())
                     }
-                }
-                Spacer()
-                // Message count badge
-                if !allMessages.isEmpty {
-                    Text("\(allMessages.count) messages")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(accentColor)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(accentColor.opacity(0.12))
-                        .clipShape(Capsule())
-                }
-                // Search link button
-                Button {
-                    store.searchForSenderRequest = sender.email
-                } label: {
-                    Label("Search in Search", systemImage: "magnifyingglass")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(LinearGradient(
-                                    colors: [accentColor.opacity(0.9), accentColor.opacity(0.75)],
-                                    startPoint: .topLeading, endPoint: .bottomTrailing
-                                ))
+                    // Move to Search button — carries sender + any active filter keyword
+                    Button {
+                        store.searchForSenderRequest = SenderSearchRequest(
+                            senderEmail: sender.email,
+                            additionalKeywords: detailFilter.trimmingCharacters(in: .whitespacesAndNewlines)
                         )
-                }
-                .buttonStyle(.plain)
-                .help("Go to Search tab and search all emails from \(sender.email)")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.bar)
-
-            Divider()
-
-            // Filter bar
-            HStack(spacing: 8) {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(detailFilter.isEmpty ? Color.secondary : accentColor)
-                TextField("Filter these emails by subject or keyword…", text: $detailFilter)
-                    .textFieldStyle(.plain)
-                    .font(.subheadline)
-                if !detailFilter.isEmpty {
-                    Button { detailFilter = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
+                    } label: {
+                        Label("Search in Search", systemImage: "magnifyingglass")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(LinearGradient(
+                                        colors: [accentColor.opacity(0.9), accentColor.opacity(0.75)],
+                                        startPoint: .topLeading, endPoint: .bottomTrailing
+                                    ))
+                            )
                     }
                     .buttonStyle(.plain)
+                    .help("Go to Search tab with from:\(sender.email)\(detailFilter.isEmpty ? "" : " \(detailFilter)")")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.bar)
+
+                Divider()
+
+                // Filter bar
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(detailFilter.isEmpty ? Color.secondary : accentColor)
+                    TextField("Filter by subject or keyword…", text: $detailFilter)
+                        .textFieldStyle(.plain)
+                        .font(.subheadline)
+                        .onChange(of: detailFilter) { _, _ in
+                            selectedMessage = nil
+                            localMessageDetail = ""
+                            localMessageDetailHTML = nil
+                        }
+                    if !detailFilter.isEmpty {
+                        Button { detailFilter = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+
+                Divider()
+
+                // Email list
+                if isLoadingMessages && allMessages.isEmpty {
+                    Spacer()
+                    ProgressView("Loading emails…")
+                    Spacer()
+                } else if filteredMessages.isEmpty {
+                    Spacer()
+                    VStack(spacing: 10) {
+                        Image(systemName: "envelope.open")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.tertiary)
+                        Text(detailFilter.isEmpty ? "No emails found for this sender" : "No emails match the filter")
+                            .foregroundStyle(.secondary)
+                        if !detailFilter.isEmpty {
+                            Button("Clear filter") { detailFilter = "" }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                    }
+                    Spacer()
+                } else {
+                    List(filteredMessages, id: \.id, selection: Binding(
+                        get: { selectedMessage?.id },
+                        set: { id in
+                            if let id, let msg = filteredMessages.first(where: { $0.id == id }) {
+                                selectMessage(msg)
+                            }
+                        }
+                    )) { message in
+                        senderMessageRow(message)
+                            .tag(message.id)
+                    }
+                    .listStyle(.inset)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+            .frame(minWidth: 300, idealWidth: 360, maxWidth: 420)
 
             Divider()
 
-            // Message list
-            if isLoadingMessages && allMessages.isEmpty {
-                Spacer()
-                ProgressView("Loading emails from \(sender.name)…")
-                Spacer()
-            } else if filteredMessages.isEmpty {
-                Spacer()
+            // Right column: message detail
+            if let message = selectedMessage {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Detail header
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(message.subject.isEmpty ? "(no subject)" : message.subject)
+                            .font(.headline)
+                            .lineLimit(3)
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("From").font(.caption).foregroundStyle(.secondary)
+                                Text(message.from).font(.subheadline).lineLimit(1)
+                            }
+                            if !message.to.isEmpty {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("To").font(.caption).foregroundStyle(.secondary)
+                                    Text(message.to).font(.subheadline).lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 1) {
+                                Text("Date").font(.caption).foregroundStyle(.secondary)
+                                Text(displayDate(message.date)).font(.subheadline)
+                            }
+                        }
+                        if !message.labels.isEmpty {
+                            HStack(spacing: 4) {
+                                ForEach(message.labels, id: \.self) { label in
+                                    Text(label)
+                                        .font(.caption2)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(accentColor.opacity(0.12))
+                                        .foregroundStyle(accentColor)
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .overlay(alignment: .topTrailing) {
+                        Button {
+                            selectedMessage = nil
+                            localMessageDetail = ""
+                            localMessageDetailHTML = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(10)
+                    }
+
+                    Divider()
+
+                    // Detail body
+                    if isLoadingDetail {
+                        Spacer()
+                        ProgressView("Loading message…")
+                            .frame(maxWidth: .infinity)
+                        Spacer()
+                    } else if let html = localMessageDetailHTML, !html.isEmpty {
+                        MessageHTMLView(html: html)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if !localMessageDetail.isEmpty {
+                        ScrollView {
+                            Text(localMessageDetail)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        Spacer()
+                        Text("No message body available.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                        Spacer()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(NSColor.windowBackgroundColor))
+            } else {
                 VStack(spacing: 10) {
                     Image(systemName: "envelope.open")
                         .font(.system(size: 36))
                         .foregroundStyle(.tertiary)
-                    Text(detailFilter.isEmpty ? "No emails found for this sender" : "No emails match the filter")
+                    Text("Select an email to read it")
                         .foregroundStyle(.secondary)
-                    if !detailFilter.isEmpty {
-                        Button("Clear filter") { detailFilter = "" }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                    }
                 }
-                Spacer()
-            } else {
-                List(filteredMessages) { message in
-                    senderMessageRow(message)
-                }
-                .listStyle(.inset)
-                if !detailFilter.isEmpty {
-                    HStack {
-                        Text("\(filteredMessages.count) of \(allMessages.count) emails shown")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 4)
-                    .background(.bar)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .onChange(of: sender.email) { _, _ in
+            selectedMessage = nil
+            localMessageDetail = ""
+            localMessageDetailHTML = nil
+        }
+    }
+
+    private func selectMessage(_ message: EmailMessage) {
+        selectedMessage = message
+        localMessageDetail = ""
+        localMessageDetailHTML = nil
+        isLoadingDetail = true
+        Task {
+            let (text, html) = await store.fetchMessageDetail(id: message.id)
+            localMessageDetail = text
+            localMessageDetailHTML = html
+            isLoadingDetail = false
         }
     }
 
     @ViewBuilder
     private func senderMessageRow(_ message: EmailMessage) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let keyword = detailFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isSelected = selectedMessage?.id == message.id
+        VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(message.subject.isEmpty ? "(no subject)" : message.subject)
-                    .font(.subheadline.weight(.medium))
+                if keyword.isEmpty {
+                    Text(message.subject.isEmpty ? "(no subject)" : message.subject)
+                        .font(.subheadline.weight(isSelected ? .bold : .medium))
+                        .lineLimit(1)
+                } else {
+                    Text(highlighted(
+                        message.subject.isEmpty ? "(no subject)" : message.subject,
+                        keyword: keyword,
+                        baseFontSize: 13,
+                        bold: isSelected
+                    ))
                     .lineLimit(1)
+                }
                 Spacer()
                 Text(displayDate(message.date))
                     .font(.caption2)
@@ -2520,13 +2805,20 @@ struct SenderDetailPanel: View {
                 }
             }
             if !message.snippet.isEmpty {
-                Text(message.snippet)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                if keyword.isEmpty {
+                    Text(message.snippet)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else {
+                    Text(highlighted(message.snippet, keyword: keyword, baseFontSize: 11))
+                        .lineLimit(2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 3)
+        .contentShape(Rectangle())
     }
 }
 

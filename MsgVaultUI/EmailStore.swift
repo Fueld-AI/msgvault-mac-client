@@ -75,6 +75,12 @@ struct StatsInfo {
     let lastSync: String
 }
 
+struct LabelInfo: Identifiable, Hashable {
+    var id: String { key }
+    let key: String
+    let count: Int
+}
+
 struct SearchLocalFilter {
     var fromContains: String = ""
     var toContains: String = ""
@@ -103,6 +109,11 @@ struct AISearchTranslation: Equatable {
     let rawJSON: String
 }
 
+struct SenderSearchRequest: Equatable {
+    let senderEmail: String
+    let additionalKeywords: String
+}
+
 // MARK: - Email Store
 
 @MainActor
@@ -117,12 +128,14 @@ class EmailStore: ObservableObject {
     @Published var senders: [SenderAggregate] = []
     @Published var senderEmailCache: [String: [EmailMessage]] = [:]
     @Published var isLoadingSenderEmails: Set<String> = []
-    @Published var searchForSenderRequest: String? = nil
+    @Published var searchForSenderRequest: SenderSearchRequest? = nil
     @Published var isRefreshingEmail = false
     @Published var emailRefreshStatus = "Ready to refresh"
     @Published var emailRefreshError: String?
     @Published var accounts: [VaultAccount] = []
     @Published var isLoadingAccounts = false
+    @Published var availableLabels: [LabelInfo] = []
+    @Published var isLoadingLabels = false
     @Published var isPerformingAccountAction = false
     @Published var accountsError: String?
     @Published var accountActionStatus = ""
@@ -226,9 +239,6 @@ class EmailStore: ObservableObject {
     ) async throws -> String {
         let path = msgvaultPath
         var args = ["--local"]
-        if let accountEmail, !accountEmail.isEmpty {
-            args += ["--account", accountEmail]
-        }
         args += arguments
         return try await Self.executeCommand(path: path, arguments: args, timeoutSeconds: timeoutSeconds)
     }
@@ -612,6 +622,23 @@ class EmailStore: ObservableObject {
         isLoadingAccounts = false
     }
 
+    func fetchLabels() async {
+        guard !isLoadingLabels else { return }
+        isLoadingLabels = true
+        defer { isLoadingLabels = false }
+        do {
+            let output = try await runMsgvaultAsync(arguments: ["list-labels", "--json", "-n", "500"])
+            guard let data = output.data(using: .utf8),
+                  let jsonArray = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            availableLabels = jsonArray.compactMap { dict in
+                guard let key = dict["key"] as? String else { return nil }
+                return LabelInfo(key: key, count: dict["count"] as? Int ?? 0)
+            }.sorted { $0.count > $1.count }
+        } catch {
+            // Labels are optional; silently ignore errors
+        }
+    }
+
     @discardableResult
     func addAccount(
         email: String,
@@ -719,6 +746,23 @@ class EmailStore: ObservableObject {
         }
     }
     
+    func fetchMessageDetail(id: String) async -> (bodyText: String, bodyHTML: String?) {
+        do {
+            let output = try await runMsgvaultAsync(arguments: ["show-message", id, "--json"])
+            if let detail = parseMessageDetail(output) {
+                return (detail.bodyText, detail.bodyHTML)
+            }
+            return (output, nil)
+        } catch {
+            do {
+                let legacyOutput = try await runMsgvaultAsync(arguments: ["show-message", id])
+                return (legacyOutput, nil)
+            } catch {
+                return ("Failed to load message: \(error.localizedDescription)", nil)
+            }
+        }
+    }
+
     // MARK: - Parsers
     
     private func parseSearchResults(_ output: String) -> [EmailMessage] {
