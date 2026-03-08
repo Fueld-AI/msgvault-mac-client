@@ -175,6 +175,7 @@ struct SearchView: View {
     @State private var filterSizePreset: SizePreset = .none
     @State private var filterHasAttachment = false
     @State private var filterLabel = ""
+    @State private var selectedAccountEmail = ""
     @State private var searchScope: SearchScope = .everything
     @State private var aiAssistEnabled = true
     @State private var translatedQueryPreview: String?
@@ -191,13 +192,13 @@ struct SearchView: View {
     private var hasActiveFilters: Bool {
         !filterFrom.isEmpty || !filterTo.isEmpty || !filterCC.isEmpty || !filterBCC.isEmpty || !filterSubject.isEmpty ||
         filterAfterDate != nil || filterBeforeDate != nil || filterRelativeDate != .none || filterSizePreset != .none ||
-        filterHasAttachment || !filterLabel.isEmpty
+        filterHasAttachment || !filterLabel.isEmpty || !selectedAccountEmail.isEmpty
     }
     
     private var activeFilterCount: Int {
         [!filterFrom.isEmpty, !filterTo.isEmpty, !filterCC.isEmpty, !filterBCC.isEmpty, !filterSubject.isEmpty,
          filterAfterDate != nil, filterBeforeDate != nil, filterRelativeDate != .none,
-         filterSizePreset != .none, filterHasAttachment, !filterLabel.isEmpty]
+         filterSizePreset != .none, filterHasAttachment, !filterLabel.isEmpty, !selectedAccountEmail.isEmpty]
             .filter { $0 }.count
     }
     
@@ -357,6 +358,7 @@ struct SearchView: View {
     private func buildSearchPlan(keywordOverride: String? = nil) -> SearchPlan {
         var parts: [String] = []
         var localFilter = SearchLocalFilter()
+        let accountFilter = selectedAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         let fromFilter = filterFrom.trimmingCharacters(in: .whitespacesAndNewlines)
         if !fromFilter.isEmpty {
             localFilter.fromContains = fromFilter
@@ -432,7 +434,7 @@ struct SearchView: View {
         return SearchPlan(
             query: parts.joined(separator: " "),
             localFilter: localFilter,
-            accountEmail: nil
+            accountEmail: accountFilter.isEmpty ? nil : accountFilter
         )
     }
     
@@ -514,6 +516,7 @@ struct SearchView: View {
         filterSizePreset = .none
         filterHasAttachment = false
         filterLabel = ""
+        selectedAccountEmail = ""
         translatedQueryPreview = nil
         translatedQueryJSONPreview = nil
         store.searchResults = []
@@ -558,6 +561,7 @@ struct SearchView: View {
         filterSizePreset = .none
         filterHasAttachment = false
         filterLabel = ""
+        selectedAccountEmail = ""
     }
     
     private func makeOperatorToken(prefix: String, value: String) -> String {
@@ -673,6 +677,46 @@ struct SearchView: View {
                             .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                     )
                     .help("Limit the top search bar to specific fields")
+                    
+                    if !store.accounts.isEmpty {
+                        Menu {
+                            Button("All accounts") {
+                                selectedAccountEmail = ""
+                            }
+                            Divider()
+                            ForEach(store.accounts) { account in
+                                Button(account.email) {
+                                    selectedAccountEmail = account.email
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(selectedAccountEmail.isEmpty ? "Account: All" : selectedAccountEmail)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundStyle(selectedAccountEmail.isEmpty ? .primary : accentColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(selectedAccountEmail.isEmpty
+                                          ? Color(NSColor.controlBackgroundColor)
+                                          : accentColor.opacity(0.12))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(selectedAccountEmail.isEmpty
+                                                  ? Color.primary.opacity(0.08)
+                                                  : accentColor.opacity(0.30), lineWidth: 1)
+                            )
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Search all accounts or one selected account")
+                    }
 
                     // Label picker button
                     Button {
@@ -1292,6 +1336,7 @@ struct SearchView: View {
         .onChange(of: filterSizePreset) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: filterHasAttachment) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: filterLabel) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: selectedAccountEmail) { _, _ in scheduleDebouncedSearch() }
         .onChange(of: store.searchForSenderRequest) { _, request in
             guard let req = request else { return }
             store.searchForSenderRequest = nil
@@ -1343,6 +1388,7 @@ struct SearchView: View {
                 }
                 if filterHasAttachment { filterChip("has:attachment") { filterHasAttachment = false } }
                 if !filterLabel.isEmpty { filterChip("label:\(filterLabel)") { filterLabel = "" } }
+                if !selectedAccountEmail.isEmpty { filterChip("account:\(selectedAccountEmail)") { selectedAccountEmail = "" } }
             }
         }
     }
@@ -3237,6 +3283,34 @@ struct SettingsView: View {
 
         var id: String { rawValue }
     }
+    
+    private struct QwenModelPreset: Identifiable {
+        let id: String
+        let tag: String
+        let size: String
+        let note: String
+    }
+    
+    private let qwenModelPresets: [QwenModelPreset] = [
+        QwenModelPreset(
+            id: "qwen-0.8b",
+            tag: "qwen3.5:0.8b",
+            size: "~1.0 GB",
+            note: "Fastest and lightest"
+        ),
+        QwenModelPreset(
+            id: "qwen-2b",
+            tag: "qwen3.5:2b",
+            size: "~2.7 GB",
+            note: "Best balance (recommended)"
+        ),
+        QwenModelPreset(
+            id: "qwen-4b",
+            tag: "qwen3.5:4b",
+            size: "~3.4 GB",
+            note: "Higher quality parsing"
+        )
+    ]
 
     private var appTheme: AppTheme {
         AppTheme.from(rawValue: appThemeRawValue)
@@ -3430,6 +3504,59 @@ struct SettingsView: View {
     
     private var aiTab: some View {
         Form {
+            Section("AI Runtime") {
+                HStack(spacing: 8) {
+                    Image(systemName: store.ollamaReachable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(store.ollamaReachable ? .green : .orange)
+                    Text(store.aiRuntimeStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Refresh") {
+                        Task { await store.refreshAIRuntimeStatus() }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                
+                if let path = store.ollamaBinaryPath, !path.isEmpty {
+                    LabeledContent("Ollama binary") {
+                        Text(path)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+                
+                if !store.ollamaInstalledModels.isEmpty {
+                    LabeledContent("Installed models") {
+                        Text("\(store.ollamaInstalledModels.count)")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(store.ollamaInstalledModels.joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(3)
+                }
+                
+                Text("Current runtime: Ollama. Embedded MLX runtime (no external dependency) can be added later for Apple Silicon.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                
+                if store.isInstallingAIModel {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(store.aiModelInstallStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if !store.aiModelInstallStatus.isEmpty {
+                    Text(store.aiModelInstallStatus)
+                        .font(.caption)
+                        .foregroundStyle(store.aiModelInstallStatus.hasPrefix("Install failed") ? .red : .secondary)
+                }
+            }
+            
             Section("AI Search Translation") {
                 Toggle("Enable AI query translation", isOn: Binding(
                     get: { store.aiSearchEnabled },
@@ -3438,11 +3565,21 @@ struct SettingsView: View {
                 .tint(accentColor)
 
                 HStack {
-                    TextField("Ollama model name (e.g. qwen2.5:1.5b)", text: $aiModelDraft)
+                    TextField("Ollama model name (e.g. qwen3.5:2b)", text: $aiModelDraft)
                     Button("Save Model") {
                         store.setAIModelName(aiModelDraft)
                     }
                     .buttonStyle(.bordered)
+                    Button(store.isInstallingAIModel && store.installingAIModelName == aiModelDraft ? "Installing..." : "Install") {
+                        let modelToInstall = aiModelDraft
+                        Task { _ = await store.installAIModel(modelToInstall) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(accentColor)
+                    .disabled(
+                        aiModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        store.isInstallingAIModel
+                    )
                 }
 
                 Toggle("Enable live search as you type", isOn: $store.liveSearchEnabled)
@@ -3451,6 +3588,47 @@ struct SettingsView: View {
                 Text(store.aiSearchStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            
+            Section("Recommended Qwen Models") {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(qwenModelPresets) { preset in
+                        HStack(spacing: 10) {
+                            let isInstalled = store.ollamaInstalledModels.contains(preset.tag)
+                            let isInstallingThisModel = store.isInstallingAIModel && store.installingAIModelName == preset.tag
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preset.tag)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(accentColor)
+                                Text("\(preset.size) - \(preset.note)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Button(isInstalled ? "Installed" : (isInstallingThisModel ? "Installing..." : "Install")) {
+                                Task { _ = await store.installAIModel(preset.tag) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(accentColor)
+                            .disabled(isInstalled || store.isInstallingAIModel)
+                            
+                            Button(store.aiModelName == preset.tag ? "Selected" : "Use") {
+                                aiModelDraft = preset.tag
+                                store.setAIModelName(preset.tag)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(store.aiModelName == preset.tag)
+                        }
+                        .padding(.vertical, 3)
+                    }
+                    
+                    Text("Install any preset locally with `ollama pull <model-tag>`, then select it here.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             
             Section("AI Translation Test") {
@@ -3495,6 +3673,9 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .task {
+            await store.refreshAIRuntimeStatus()
+        }
     }
     
     private func syntaxRow(_ syntax: String, _ description: String) -> some View {

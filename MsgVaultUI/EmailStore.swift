@@ -149,6 +149,14 @@ class EmailStore: ObservableObject {
         didSet { UserDefaults.standard.set(liveSearchEnabled, forKey: Self.liveSearchEnabledKey) }
     }
     @Published var aiSearchStatus = "AI query translation is disabled."
+    @Published var aiRuntimeStatus = "Checking AI runtime..."
+    @Published var ollamaInstalled = false
+    @Published var ollamaReachable = false
+    @Published var ollamaBinaryPath: String?
+    @Published var ollamaInstalledModels: [String] = []
+    @Published var isInstallingAIModel = false
+    @Published var installingAIModelName: String?
+    @Published var aiModelInstallStatus = ""
     
     // Path to msgvault binary - adjust if needed
     var msgvaultPath: String = "/usr/local/bin/msgvault"
@@ -162,7 +170,7 @@ class EmailStore: ObservableObject {
     private static let aiSearchEnabledKey = "search.ai.enabled"
     private static let aiModelNameKey = "search.ai.model"
     private static let liveSearchEnabledKey = "search.live.enabled"
-    private static let defaultAIModelName = "qwen2.5:1.5b"
+    private static let defaultAIModelName = "qwen3.5:2b"
     
     init() {
         let defaults = UserDefaults.standard
@@ -171,9 +179,11 @@ class EmailStore: ObservableObject {
         self.liveSearchEnabled = defaults.object(forKey: Self.liveSearchEnabledKey) as? Bool ?? true
         // Try to find msgvault
         findMsgvault()
-        aiSearchStatus = aiSearchEnabled
-            ? "AI query translation enabled (model: \(aiModelName))."
-            : "AI query translation is disabled."
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshAIRuntimeStatus()
+            self.updateAISearchStatus()
+        }
     }
     
     private func findMsgvault() {
@@ -239,6 +249,12 @@ class EmailStore: ObservableObject {
     ) async throws -> String {
         let path = msgvaultPath
         var args = ["--local"]
+        if let accountEmail {
+            let trimmed = accountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                args += ["--account", trimmed]
+            }
+        }
         args += arguments
         return try await Self.executeCommand(path: path, arguments: args, timeoutSeconds: timeoutSeconds)
     }
@@ -320,26 +336,145 @@ class EmailStore: ObservableObject {
     
     func setAISearchEnabled(_ enabled: Bool) {
         aiSearchEnabled = enabled
-        aiSearchStatus = enabled
-            ? "AI query translation enabled (model: \(aiModelName))."
-            : "AI query translation is disabled."
+        updateAISearchStatus()
     }
     
     func setAIModelName(_ modelName: String) {
         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         aiModelName = trimmed
-        if aiSearchEnabled {
-            aiSearchStatus = "AI query translation enabled (model: \(aiModelName))."
+        updateAISearchStatus()
+    }
+    
+    func refreshAIRuntimeStatus() async {
+        let maybePath = findOllamaBinaryPath()
+        ollamaBinaryPath = maybePath
+        
+        guard let ollamaPath = maybePath else {
+            ollamaInstalled = false
+            ollamaReachable = false
+            ollamaInstalledModels = []
+            aiRuntimeStatus = "Ollama not found on this machine."
+            updateAISearchStatus()
+            return
         }
+        
+        ollamaInstalled = true
+        
+        do {
+            let output = try await Self.executeCommand(path: ollamaPath, arguments: ["list"], timeoutSeconds: 8)
+            let models = parseOllamaListModels(from: output)
+            ollamaInstalledModels = models
+            ollamaReachable = true
+            aiRuntimeStatus = models.isEmpty
+                ? "Ollama is installed and running (no models pulled yet)."
+                : "Ollama is installed and running (\(models.count) model\(models.count == 1 ? "" : "s") available)."
+        } catch {
+            ollamaReachable = false
+            ollamaInstalledModels = []
+            let message = Self.cleanErrorMessage(error.localizedDescription)
+            aiRuntimeStatus = "Ollama found but not reachable: \(message)"
+        }
+        updateAISearchStatus()
+    }
+    
+    @discardableResult
+    func installAIModel(_ modelName: String) async -> Bool {
+        let model = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            aiModelInstallStatus = "Choose a model tag before installing."
+            return false
+        }
+        guard !isInstallingAIModel else {
+            aiModelInstallStatus = "A model install is already in progress."
+            return false
+        }
+        
+        guard let ollamaPath = findOllamaBinaryPath() else {
+            aiModelInstallStatus = "Ollama is not installed. Install Ollama first."
+            await refreshAIRuntimeStatus()
+            return false
+        }
+        
+        isInstallingAIModel = true
+        installingAIModelName = model
+        aiModelInstallStatus = "Downloading \(model)... This can take a few minutes."
+        
+        defer {
+            isInstallingAIModel = false
+            installingAIModelName = nil
+        }
+        
+        do {
+            _ = try await Self.executeCommand(
+                path: ollamaPath,
+                arguments: ["pull", model],
+                timeoutSeconds: nil
+            )
+            await refreshAIRuntimeStatus()
+            aiModelInstallStatus = "Installed \(model) successfully."
+            return true
+        } catch {
+            let message = Self.cleanErrorMessage(error.localizedDescription)
+            aiModelInstallStatus = "Install failed for \(model): \(message)"
+            await refreshAIRuntimeStatus()
+            return false
+        }
+    }
+    
+    private func updateAISearchStatus() {
+        guard aiSearchEnabled else {
+            aiSearchStatus = "AI query translation is disabled."
+            return
+        }
+        
+        guard ollamaInstalled else {
+            aiSearchStatus = "AI search is enabled, but Ollama is not installed."
+            return
+        }
+        
+        guard ollamaReachable else {
+            aiSearchStatus = "AI search is enabled, but Ollama is not reachable."
+            return
+        }
+        
+        if !ollamaInstalledModels.isEmpty && !ollamaInstalledModels.contains(aiModelName) {
+            aiSearchStatus = "Selected model \(aiModelName) is not pulled yet. Run `ollama pull \(aiModelName)`."
+            return
+        }
+        
+        aiSearchStatus = "AI query translation enabled (model: \(aiModelName))."
+    }
+    
+    private func parseOllamaListModels(from output: String) -> [String] {
+        output
+            .components(separatedBy: .newlines)
+            .dropFirst() // header row
+            .compactMap { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                let columns = trimmed.split(whereSeparator: \.isWhitespace)
+                guard let first = columns.first else { return nil }
+                return String(first)
+            }
     }
     
     func translateNaturalLanguageSearch(_ request: String) async -> AISearchTranslation? {
         let prompt = request.trimmingCharacters(in: .whitespacesAndNewlines)
         guard aiSearchEnabled, !prompt.isEmpty else { return nil }
         
+        if !ollamaInstalled || !ollamaReachable {
+            await refreshAIRuntimeStatus()
+            updateAISearchStatus()
+        }
+        
         guard let ollamaPath = findOllamaBinaryPath() else {
             aiSearchStatus = "AI search is enabled but Ollama was not found. Install Ollama to use local query translation."
+            return nil
+        }
+        
+        if !ollamaInstalledModels.isEmpty && !ollamaInstalledModels.contains(aiModelName) {
+            aiSearchStatus = "Model \(aiModelName) is not installed. Run `ollama pull \(aiModelName)` first."
             return nil
         }
         
