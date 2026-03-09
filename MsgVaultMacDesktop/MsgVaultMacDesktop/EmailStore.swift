@@ -197,13 +197,27 @@ struct MailActionInsights {
     let attachmentHeavySenders: [MailActionInsightItem]
 }
 
+struct AttachmentRecord: Identifiable, Hashable {
+    let id: String
+    let message: EmailMessage
+    let filename: String
+    let mimeType: String
+    let sizeBytes: Int
+    let contentHash: String
+    let disposition: String
+}
+
 // MARK: - Email Store
 
 @MainActor
 class EmailStore: ObservableObject {
     @Published var searchResults: [EmailMessage] = []
+    @Published var attachmentResults: [AttachmentRecord] = []
     @Published var isLoading = false
+    @Published var isLoadingAttachments = false
     @Published var errorMessage: String?
+    @Published var attachmentsError: String?
+    @Published var attachmentsStatus = "Ready to search attachments"
     @Published var statsInfo: StatsInfo?
     @Published var selectedMessage: EmailMessage?
     @Published var messageDetail: String = ""
@@ -1246,6 +1260,72 @@ class EmailStore: ObservableObject {
 
         return mergedMessages
     }
+
+    func searchAttachments(
+        query: String,
+        limit: Int = 120
+    ) async {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            attachmentResults = []
+            attachmentsError = nil
+            attachmentsStatus = "Add filters or keywords to search attachments."
+            return
+        }
+
+        isLoadingAttachments = true
+        attachmentsError = nil
+        attachmentsStatus = "Searching messages with attachments..."
+        defer { isLoadingAttachments = false }
+
+        do {
+            let messages = try await searchRawMessages(query: trimmedQuery, limit: limit)
+            let attachmentMessages = messages.filter { $0.hasAttachment }
+
+            guard !attachmentMessages.isEmpty else {
+                attachmentResults = []
+                attachmentsStatus = "No messages with attachments matched your filters."
+                return
+            }
+
+            attachmentsStatus = "Inspecting \(attachmentMessages.count) matching messages..."
+            var collected: [AttachmentRecord] = []
+            collected.reserveCapacity(attachmentMessages.count * 2)
+
+            for (index, message) in attachmentMessages.enumerated() {
+                do {
+                    let output = try await runMsgvaultAsync(arguments: ["show-message", message.id, "--json"])
+                    let parsed = parseAttachments(output: output, message: message)
+                    collected.append(contentsOf: parsed)
+                } catch {
+                    // Keep going if one message detail call fails.
+                }
+
+                if index % 12 == 0 || index == attachmentMessages.count - 1 {
+                    attachmentsStatus = "Scanned \(index + 1)/\(attachmentMessages.count) messages..."
+                }
+            }
+
+            attachmentResults = collected.sorted { lhs, rhs in
+                let leftDate = parseMessageDate(lhs.message.date) ?? .distantPast
+                let rightDate = parseMessageDate(rhs.message.date) ?? .distantPast
+                if leftDate != rightDate { return leftDate > rightDate }
+                if lhs.sizeBytes != rhs.sizeBytes { return lhs.sizeBytes > rhs.sizeBytes }
+                return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
+            }
+
+            if attachmentResults.isEmpty {
+                attachmentsStatus = "Matched messages had attachments, but no attachment metadata was returned."
+            } else {
+                attachmentsStatus = "Found \(attachmentResults.count) attachment\(attachmentResults.count == 1 ? "" : "s")."
+            }
+        } catch {
+            attachmentResults = []
+            let raw = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            attachmentsError = Self.cleanErrorMessage(raw)
+            attachmentsStatus = "Attachment search failed."
+        }
+    }
     
     // MARK: - Stats
     
@@ -1564,6 +1644,132 @@ class EmailStore: ObservableObject {
     }
 
     // MARK: - Parsers
+
+    private func parseAttachments(output: String, message: EmailMessage) -> [AttachmentRecord] {
+        let cleanedOutput = extractJSONObjectString(from: output) ?? output
+        guard let data = cleanedOutput.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return message.hasAttachment ? [makeFallbackAttachmentRecord(for: message, index: 0)] : []
+        }
+
+        let rawAttachments: [Any]
+        if let entries = json["attachments"] as? [Any] {
+            rawAttachments = entries
+        } else if let entries = json["attachment"] as? [Any] {
+            rawAttachments = entries
+        } else {
+            rawAttachments = []
+        }
+
+        let parsed = rawAttachments.enumerated().compactMap { index, raw in
+            parseAttachmentRecord(from: raw, message: message, index: index)
+        }
+        if !parsed.isEmpty {
+            return parsed
+        }
+
+        let fallbackCount = max(
+            parseAttachmentCount(from: json),
+            message.hasAttachment ? 1 : 0
+        )
+        guard fallbackCount > 0 else { return [] }
+        return (0..<fallbackCount).map { makeFallbackAttachmentRecord(for: message, index: $0) }
+    }
+
+    private func parseAttachmentRecord(
+        from raw: Any,
+        message: EmailMessage,
+        index: Int
+    ) -> AttachmentRecord? {
+        guard let json = raw as? [String: Any] else { return nil }
+
+        let filename = normalizedAttachmentString(
+            json["filename"] ??
+            json["file_name"] ??
+            json["name"] ??
+            json["display_name"] ??
+            json["path"]
+        ) ?? "Attachment \(index + 1)"
+
+        let mimeType = normalizedAttachmentString(
+            json["mime_type"] ??
+            json["content_type"] ??
+            json["mime"] ??
+            json["type"]
+        ) ?? "application/octet-stream"
+
+        let sizeBytes = parseAttachmentInt(
+            json["size_bytes"] ??
+            json["size"] ??
+            json["bytes"] ??
+            json["estimated_size"]
+        )
+
+        let contentHash = normalizedAttachmentString(
+            json["content_hash"] ??
+            json["hash"] ??
+            json["sha256"] ??
+            json["sha1"] ??
+            json["md5"]
+        ) ?? ""
+
+        let disposition = normalizedAttachmentString(json["disposition"]) ?? ""
+        let hashPart = contentHash.isEmpty ? "idx-\(index)" : contentHash
+        let id = "\(message.id)::\(hashPart)::\(index)"
+
+        return AttachmentRecord(
+            id: id,
+            message: message,
+            filename: filename,
+            mimeType: mimeType,
+            sizeBytes: sizeBytes,
+            contentHash: contentHash,
+            disposition: disposition
+        )
+    }
+
+    private func makeFallbackAttachmentRecord(for message: EmailMessage, index: Int) -> AttachmentRecord {
+        AttachmentRecord(
+            id: "\(message.id)::fallback-\(index)",
+            message: message,
+            filename: "Attachment \(index + 1)",
+            mimeType: "application/octet-stream",
+            sizeBytes: 0,
+            contentHash: "",
+            disposition: ""
+        )
+    }
+
+    private func parseAttachmentCount(from json: [String: Any]) -> Int {
+        parseAttachmentInt(
+            json["attachment_count"] ??
+            json["attachments_count"] ??
+            json["attachmentCount"]
+        )
+    }
+
+    private func normalizedAttachmentString(_ raw: Any?) -> String? {
+        if let value = raw as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let value = raw as? NSNumber {
+            return value.stringValue
+        }
+        return nil
+    }
+
+    private func parseAttachmentInt(_ raw: Any?) -> Int {
+        if let value = raw as? Int { return value }
+        if let value = raw as? NSNumber { return value.intValue }
+        if let value = raw as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let direct = Int(trimmed) { return direct }
+            let digits = trimmed.filter(\.isNumber)
+            return Int(digits) ?? 0
+        }
+        return 0
+    }
     
     private func parseSearchResults(_ output: String) -> [EmailMessage] {
         // Strip progress text (e.g. "Searching...") and keep only JSON payload if present.

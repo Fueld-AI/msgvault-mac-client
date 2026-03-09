@@ -155,6 +155,12 @@ Pull requests are welcome. For significant changes, please open an issue first t
 
 ---
 
+## License
+
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE) for details.
+
+---
+
 <div align="center">
 
 <br />

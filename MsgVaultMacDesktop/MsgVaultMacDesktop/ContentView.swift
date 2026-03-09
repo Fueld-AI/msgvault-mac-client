@@ -26,6 +26,7 @@ struct ContentView: View {
     
     enum SidebarTab: String, CaseIterable {
         case search = "Search"
+        case attachments = "Attachments"
         case senders = "Sender Search"
         case stats = "Stats"
         case accounts = "Accounts"
@@ -34,6 +35,7 @@ struct ContentView: View {
         var icon: String {
             switch self {
             case .search: return "magnifyingglass"
+            case .attachments: return "paperclip"
             case .senders: return "person.2"
             case .stats: return "chart.bar"
             case .accounts: return "person.crop.circle.badge.plus"
@@ -147,6 +149,8 @@ struct ContentView: View {
                 switch selectedTab {
                 case .search:
                     SearchView()
+                case .attachments:
+                    AttachmentsView()
                 case .senders:
                     SendersView()
                 case .stats:
@@ -1938,6 +1942,877 @@ struct SearchView: View {
         .background(accentColor.opacity(0.12))
         .foregroundStyle(accentColor)
         .clipShape(Capsule())
+    }
+}
+
+// MARK: - Attachments View
+
+struct AttachmentsView: View {
+    @EnvironmentObject var store: EmailStore
+    @Environment(\.appAccentColor) private var accentColor
+
+    @State private var selectedAttachmentId: String?
+    @State private var keywords = ""
+    @State private var filterFrom = ""
+    @State private var filterTo = ""
+    @State private var filterSubject = ""
+    @State private var filterLabel = ""
+    @State private var filterAfterDate: Date?
+    @State private var filterBeforeDate: Date?
+    @State private var filterRelativeDate: AttachmentRelativeDatePreset = .none
+    @State private var selectedAccountEmail = ""
+    @State private var showFilters = false
+    @State private var sortOption: AttachmentSortOption = .largestFirst
+    @State private var localFilenameFilter = ""
+    @State private var localMimeFilter = ""
+    @State private var localTypeFilter: AttachmentTypeFilter = .all
+    @State private var localSizeFilter: AttachmentSizePreset = .none
+    @State private var debounceTask: Task<Void, Never>?
+
+    private static let queryDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+    private static let isoDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+    private static let isoDateFormatterFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private enum AttachmentRelativeDatePreset: String, CaseIterable, Identifiable {
+        case none
+        case lastDay
+        case lastWeek
+        case lastMonth
+        case lastThreeMonths
+        case lastYear
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: return "Any time"
+            case .lastDay: return "Last 24 hours"
+            case .lastWeek: return "Last 7 days"
+            case .lastMonth: return "Last 30 days"
+            case .lastThreeMonths: return "Last 3 months"
+            case .lastYear: return "Last year"
+            }
+        }
+
+        var queryToken: String? {
+            switch self {
+            case .none: return nil
+            case .lastDay: return "newer_than:1d"
+            case .lastWeek: return "newer_than:7d"
+            case .lastMonth: return "newer_than:30d"
+            case .lastThreeMonths: return "newer_than:90d"
+            case .lastYear: return "newer_than:365d"
+            }
+        }
+    }
+
+    private enum AttachmentSortOption: String, CaseIterable, Identifiable {
+        case largestFirst
+        case smallestFirst
+        case newestFirst
+        case oldestFirst
+        case senderAZ
+        case filenameAZ
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .largestFirst: return "Attachment size: Largest first"
+            case .smallestFirst: return "Attachment size: Smallest first"
+            case .newestFirst: return "Message date: Newest first"
+            case .oldestFirst: return "Message date: Oldest first"
+            case .senderAZ: return "Sender: A to Z"
+            case .filenameAZ: return "Filename: A to Z"
+            }
+        }
+
+        var shortLabel: String {
+            switch self {
+            case .largestFirst: return "Largest"
+            case .smallestFirst: return "Smallest"
+            case .newestFirst: return "Newest"
+            case .oldestFirst: return "Oldest"
+            case .senderAZ: return "Sender A-Z"
+            case .filenameAZ: return "Filename A-Z"
+            }
+        }
+    }
+
+    private enum AttachmentTypeFilter: String, CaseIterable, Identifiable {
+        case all
+        case documents
+        case images
+        case media
+        case archives
+        case other
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .all: return "All file types"
+            case .documents: return "Documents"
+            case .images: return "Images"
+            case .media: return "Audio/Video"
+            case .archives: return "Archives"
+            case .other: return "Other"
+            }
+        }
+
+        func matches(mimeType: String, filename: String) -> Bool {
+            if self == .all { return true }
+            let mime = mimeType.lowercased()
+            let ext = (filename as NSString).pathExtension.lowercased()
+            switch self {
+            case .all:
+                return true
+            case .documents:
+                return mime.contains("pdf") ||
+                mime.contains("msword") ||
+                mime.contains("officedocument") ||
+                mime.contains("text/") ||
+                ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "csv"].contains(ext)
+            case .images:
+                return mime.hasPrefix("image/") ||
+                ["png", "jpg", "jpeg", "gif", "webp", "heic", "svg"].contains(ext)
+            case .media:
+                return mime.hasPrefix("audio/") || mime.hasPrefix("video/") ||
+                ["mp3", "wav", "aac", "m4a", "mp4", "mov", "avi", "mkv"].contains(ext)
+            case .archives:
+                return mime.contains("zip") || mime.contains("tar") || mime.contains("gzip") ||
+                ["zip", "tar", "gz", "tgz", "rar", "7z"].contains(ext)
+            case .other:
+                return !AttachmentTypeFilter.documents.matches(mimeType: mimeType, filename: filename) &&
+                !AttachmentTypeFilter.images.matches(mimeType: mimeType, filename: filename) &&
+                !AttachmentTypeFilter.media.matches(mimeType: mimeType, filename: filename) &&
+                !AttachmentTypeFilter.archives.matches(mimeType: mimeType, filename: filename)
+            }
+        }
+    }
+
+    private enum AttachmentSizePreset: String, CaseIterable, Identifiable {
+        case none
+        case largerThan1MB
+        case largerThan5MB
+        case largerThan10MB
+        case smallerThan500KB
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: return "Any attachment size"
+            case .largerThan1MB: return "Larger than 1 MB"
+            case .largerThan5MB: return "Larger than 5 MB"
+            case .largerThan10MB: return "Larger than 10 MB"
+            case .smallerThan500KB: return "Smaller than 500 KB"
+            }
+        }
+
+        func matches(_ bytes: Int) -> Bool {
+            switch self {
+            case .none: return true
+            case .largerThan1MB: return bytes >= 1_000_000
+            case .largerThan5MB: return bytes >= 5_000_000
+            case .largerThan10MB: return bytes >= 10_000_000
+            case .smallerThan500KB: return bytes > 0 && bytes <= 500_000
+            }
+        }
+    }
+
+    private var hasActiveServerFilters: Bool {
+        !keywords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !filterFrom.isEmpty ||
+        !filterTo.isEmpty ||
+        !filterSubject.isEmpty ||
+        !filterLabel.isEmpty ||
+        !selectedAccountEmail.isEmpty ||
+        filterAfterDate != nil ||
+        filterBeforeDate != nil ||
+        filterRelativeDate != .none
+    }
+
+    private var hasActiveLocalFilters: Bool {
+        !localFilenameFilter.isEmpty ||
+        !localMimeFilter.isEmpty ||
+        localTypeFilter != .all ||
+        localSizeFilter != .none
+    }
+
+    private var activeFilterCount: Int {
+        [
+            !keywords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            !filterFrom.isEmpty,
+            !filterTo.isEmpty,
+            !filterSubject.isEmpty,
+            !filterLabel.isEmpty,
+            !selectedAccountEmail.isEmpty,
+            filterAfterDate != nil,
+            filterBeforeDate != nil,
+            filterRelativeDate != .none,
+            !localFilenameFilter.isEmpty,
+            !localMimeFilter.isEmpty,
+            localTypeFilter != .all,
+            localSizeFilter != .none
+        ].filter { $0 }.count
+    }
+
+    private var labelsFromAttachmentResults: [LabelInfo] {
+        var counts: [String: Int] = [:]
+        for record in store.attachmentResults {
+            for label in record.message.labels {
+                counts[label, default: 0] += 1
+            }
+        }
+        return counts
+            .map { LabelInfo(key: $0.key, count: $0.value) }
+            .sorted { $0.count > $1.count }
+    }
+
+    private func queryDateString(_ date: Date) -> String {
+        Self.queryDateFormatter.string(from: date)
+    }
+
+    private func sortableDate(_ value: String) -> Date {
+        if let parsed = Self.isoDateFormatterFractional.date(from: value) {
+            return parsed
+        }
+        if let parsed = Self.isoDateFormatter.date(from: value) {
+            return parsed
+        }
+        if let parsed = Self.queryDateFormatter.date(from: value) {
+            return parsed
+        }
+        return .distantPast
+    }
+
+    private func makeOperatorToken(prefix: String, value: String) -> String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.contains(where: \.isWhitespace) else {
+            return "\(prefix)\(cleaned)"
+        }
+        let escaped = cleaned.replacingOccurrences(of: "\"", with: "\\\"")
+        return "\(prefix)\"\(escaped)\""
+    }
+
+    private func makeKeywordToken(_ value: String) -> String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.contains(where: \.isWhitespace) else { return cleaned }
+        let escaped = cleaned.replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private func isLikelyExactEmailAddress(_ value: String) -> Bool {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = cleaned.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return false }
+        guard !parts[0].isEmpty, !parts[1].isEmpty else { return false }
+        return parts[1].contains(".")
+    }
+
+    private func buildQuery() -> String {
+        var parts: [String] = []
+
+        let accountFilter = selectedAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !accountFilter.isEmpty {
+            parts.append(makeOperatorToken(prefix: "to:", value: accountFilter))
+        }
+
+        let from = filterFrom.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !from.isEmpty {
+            if isLikelyExactEmailAddress(from) {
+                parts.append(makeOperatorToken(prefix: "from:", value: from))
+            } else {
+                parts.append(makeKeywordToken(from))
+            }
+        }
+
+        let to = filterTo.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !to.isEmpty {
+            if isLikelyExactEmailAddress(to) {
+                parts.append(makeOperatorToken(prefix: "to:", value: to))
+            } else {
+                parts.append(makeKeywordToken(to))
+            }
+        }
+
+        let subject = filterSubject.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !subject.isEmpty {
+            parts.append(makeOperatorToken(prefix: "subject:", value: subject))
+        }
+
+        if let filterAfterDate { parts.append("after:\(queryDateString(filterAfterDate))") }
+        if let filterBeforeDate { parts.append("before:\(queryDateString(filterBeforeDate))") }
+        if filterAfterDate == nil, filterBeforeDate == nil, let relativeToken = filterRelativeDate.queryToken {
+            parts.append(relativeToken)
+        }
+
+        let label = filterLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !label.isEmpty {
+            parts.append(makeOperatorToken(prefix: "label:", value: label))
+        }
+
+        let kw = keywords.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !kw.isEmpty {
+            parts.append(kw)
+        }
+
+        parts.append("has:attachment")
+        return parts.joined(separator: " ")
+    }
+
+    private func runSearch() {
+        debounceTask?.cancel()
+        selectedAttachmentId = nil
+        store.selectedMessage = nil
+        store.messageDetail = ""
+        store.messageDetailHTML = nil
+        let query = buildQuery()
+        Task { await store.searchAttachments(query: query, limit: 180) }
+    }
+
+    private func scheduleDebouncedSearch() {
+        guard store.liveSearchEnabled else { return }
+        debounceTask?.cancel()
+        debounceTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            runSearch()
+        }
+    }
+
+    private var displayedAttachments: [AttachmentRecord] {
+        var items = store.attachmentResults
+
+        let filenameTerms = localFilenameFilter
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        if !filenameTerms.isEmpty {
+            items = items.filter { record in
+                let haystack = "\(record.filename) \(record.message.subject) \(record.message.from) \(record.message.snippet)"
+                    .lowercased()
+                return filenameTerms.allSatisfy { haystack.contains($0) }
+            }
+        }
+
+        let mimeTerm = localMimeFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !mimeTerm.isEmpty {
+            items = items.filter { $0.mimeType.lowercased().contains(mimeTerm) }
+        }
+
+        if localTypeFilter != .all {
+            items = items.filter {
+                localTypeFilter.matches(mimeType: $0.mimeType, filename: $0.filename)
+            }
+        }
+
+        if localSizeFilter != .none {
+            items = items.filter { localSizeFilter.matches($0.sizeBytes) }
+        }
+
+        switch sortOption {
+        case .largestFirst:
+            items.sort {
+                if $0.sizeBytes != $1.sizeBytes { return $0.sizeBytes > $1.sizeBytes }
+                return sortableDate($0.message.date) > sortableDate($1.message.date)
+            }
+        case .smallestFirst:
+            items.sort {
+                if $0.sizeBytes != $1.sizeBytes { return $0.sizeBytes < $1.sizeBytes }
+                return sortableDate($0.message.date) > sortableDate($1.message.date)
+            }
+        case .newestFirst:
+            items.sort {
+                sortableDate($0.message.date) > sortableDate($1.message.date)
+            }
+        case .oldestFirst:
+            items.sort {
+                sortableDate($0.message.date) < sortableDate($1.message.date)
+            }
+        case .senderAZ:
+            items.sort {
+                let comparison = $0.message.from.localizedCaseInsensitiveCompare($1.message.from)
+                if comparison == .orderedSame { return sortableDate($0.message.date) > sortableDate($1.message.date) }
+                return comparison == .orderedAscending
+            }
+        case .filenameAZ:
+            items.sort {
+                let comparison = $0.filename.localizedCaseInsensitiveCompare($1.filename)
+                if comparison == .orderedSame { return sortableDate($0.message.date) > sortableDate($1.message.date) }
+                return comparison == .orderedAscending
+            }
+        }
+
+        return items
+    }
+
+    private func clearAllFilters() {
+        keywords = ""
+        filterFrom = ""
+        filterTo = ""
+        filterSubject = ""
+        filterLabel = ""
+        selectedAccountEmail = ""
+        filterAfterDate = nil
+        filterBeforeDate = nil
+        filterRelativeDate = .none
+        localFilenameFilter = ""
+        localMimeFilter = ""
+        localTypeFilter = .all
+        localSizeFilter = .none
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(keywords.isEmpty ? .secondary : accentColor)
+                        TextField("Search attachments (filename, sender, topic)...", text: $keywords)
+                            .textFieldStyle(.plain)
+                            .font(.body)
+                            .onSubmit { runSearch() }
+                        if !keywords.isEmpty {
+                            Button {
+                                keywords = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color(NSColor.controlBackgroundColor))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(
+                                keywords.isEmpty ? Color.primary.opacity(0.10) : accentColor.opacity(0.45),
+                                lineWidth: 1
+                            )
+                    )
+
+                    if !store.accounts.isEmpty {
+                        Menu {
+                            Button("All accounts") {
+                                selectedAccountEmail = ""
+                            }
+                            Divider()
+                            ForEach(store.accounts) { account in
+                                Button(account.email) {
+                                    selectedAccountEmail = account.email
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(selectedAccountEmail.isEmpty ? "Account: All" : selectedAccountEmail)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .foregroundStyle(selectedAccountEmail.isEmpty ? .primary : accentColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(selectedAccountEmail.isEmpty ? Color(NSColor.controlBackgroundColor) : accentColor.opacity(0.12))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(
+                                        selectedAccountEmail.isEmpty ? Color.primary.opacity(0.08) : accentColor.opacity(0.30),
+                                        lineWidth: 1
+                                    )
+                            )
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                    }
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showFilters.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 14, weight: .medium))
+                            if activeFilterCount > 0 {
+                                Text("\(activeFilterCount)")
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(.white.opacity(0.25))
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        .foregroundStyle(showFilters || hasActiveServerFilters || hasActiveLocalFilters ? .white : .secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(showFilters || hasActiveServerFilters || hasActiveLocalFilters
+                                      ? LinearGradient(colors: [accentColor.opacity(0.9), accentColor.opacity(0.75)],
+                                                       startPoint: .topLeading, endPoint: .bottomTrailing)
+                                      : LinearGradient(colors: [Color(NSColor.controlBackgroundColor), Color(NSColor.controlBackgroundColor)],
+                                                       startPoint: .topLeading, endPoint: .bottomTrailing))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(showFilters || hasActiveServerFilters || hasActiveLocalFilters
+                                              ? accentColor.opacity(0.30)
+                                              : Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle attachment filters")
+
+                    Button("Search") { runSearch() }
+                        .buttonStyle(.plain)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(LinearGradient(colors: [accentColor.opacity(0.95), accentColor.opacity(0.80)],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                        )
+                        .keyboardShortcut(.return, modifiers: [])
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+                if showFilters {
+                    VStack(spacing: 12) {
+                        Divider().opacity(0.5)
+
+                        HStack(spacing: 12) {
+                            FilterField(label: "From", placeholder: "sender@example.com", text: $filterFrom, icon: "person")
+                            FilterField(label: "To", placeholder: "recipient@example.com", text: $filterTo, icon: "person.2")
+                        }
+
+                        HStack(spacing: 12) {
+                            FilterField(label: "Subject", placeholder: "invoice, statement", text: $filterSubject, icon: "text.alignleft")
+                            FilterFieldLabelPicker(
+                                selectedLabel: $filterLabel,
+                                onSelect: { scheduleDebouncedSearch() },
+                                resultLabels: labelsFromAttachmentResults.isEmpty ? nil : labelsFromAttachmentResults
+                            )
+                        }
+
+                        HStack(spacing: 12) {
+                            Picker("Quick Date", selection: $filterRelativeDate) {
+                                ForEach(AttachmentRelativeDatePreset.allCases) { preset in
+                                    Text(preset.label).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Picker("Type", selection: $localTypeFilter) {
+                                ForEach(AttachmentTypeFilter.allCases) { filter in
+                                    Text(filter.label).tag(filter)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Picker("Attachment Size", selection: $localSizeFilter) {
+                                ForEach(AttachmentSizePreset.allCases) { preset in
+                                    Text(preset.label).tag(preset)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        HStack(spacing: 12) {
+                            DateFilterField(label: "After", date: $filterAfterDate, icon: "calendar")
+                            DateRangeConnector()
+                            DateFilterField(label: "Before", date: $filterBeforeDate, icon: "calendar")
+                        }
+
+                        HStack(spacing: 12) {
+                            FilterField(label: "Filename contains", placeholder: "invoice.pdf", text: $localFilenameFilter, icon: "doc")
+                            FilterField(label: "MIME contains", placeholder: "application/pdf", text: $localMimeFilter, icon: "tag")
+                        }
+
+                        if hasActiveServerFilters || hasActiveLocalFilters {
+                            HStack {
+                                Spacer()
+                                Button("Clear filters") {
+                                    clearAllFilters()
+                                }
+                                .font(.caption)
+                                .buttonStyle(.plain)
+                                .foregroundStyle(accentColor)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .background(.bar)
+
+            Divider()
+
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if store.isLoadingAttachments {
+                        Spacer()
+                        VStack(spacing: 10) {
+                            ProgressView()
+                            Text(store.attachmentsStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    } else if let error = store.attachmentsError {
+                        Spacer()
+                        VStack(spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 36))
+                                .foregroundStyle(.orange)
+                            Text("Attachment Search Error")
+                                .font(.headline)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 320)
+                        }
+                        Spacer()
+                    } else if displayedAttachments.isEmpty {
+                        Spacer()
+                        VStack(spacing: 12) {
+                            Image(systemName: "paperclip")
+                                .font(.system(size: 42))
+                                .foregroundStyle(.tertiary)
+                            Text(store.attachmentResults.isEmpty ? "Search your archive for attachments" : "No attachments match these filters")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            Text(store.attachmentResults.isEmpty
+                                 ? "Use sender, label, date and keywords to index attachments across your vault."
+                                 : "Try a broader file type, MIME, or filename filter.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 300)
+                        }
+                        Spacer()
+                    } else {
+                        HStack(spacing: 10) {
+                            Text("\(displayedAttachments.count) attachment\(displayedAttachments.count == 1 ? "" : "s")")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle((hasActiveLocalFilters || hasActiveServerFilters) ? accentColor : .secondary)
+                            Spacer()
+                            Menu {
+                                Picker("Sort", selection: $sortOption) {
+                                    ForEach(AttachmentSortOption.allCases) { option in
+                                        Text(option.label).tag(option)
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "arrow.up.arrow.down")
+                                        .font(.caption.weight(.semibold))
+                                    Text(sortOption.shortLabel)
+                                        .font(.caption.weight(.semibold))
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.system(size: 8, weight: .semibold))
+                                }
+                                .foregroundStyle(accentColor)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(accentColor.opacity(0.12))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .strokeBorder(accentColor.opacity(0.30), lineWidth: 1)
+                                )
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(.bar)
+
+                        Divider()
+
+                        List(displayedAttachments, selection: $selectedAttachmentId) { attachment in
+                            AttachmentRowView(attachment: attachment)
+                                .tag(attachment.id)
+                        }
+                        .listStyle(.inset)
+                        .onChange(of: selectedAttachmentId) { _, newID in
+                            guard let newID,
+                                  let selected = displayedAttachments.first(where: { $0.id == newID }) else { return }
+                            store.selectedMessage = selected.message
+                            Task { await store.loadMessageDetail(id: selected.message.id) }
+                        }
+                    }
+
+                    HStack {
+                        Spacer()
+                        Text(buildQuery())
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .help(buildQuery())
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(.bar)
+                }
+                .frame(minWidth: 390, idealWidth: 490, maxWidth: 560)
+
+                Divider()
+
+                MessageDetailView()
+                    .frame(minWidth: 350, idealWidth: 500, maxWidth: .infinity)
+            }
+        }
+        .task {
+            if store.accounts.isEmpty {
+                await store.loadAccounts()
+            }
+            if store.attachmentResults.isEmpty {
+                runSearch()
+            }
+        }
+        .onChange(of: keywords) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterFrom) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterTo) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterSubject) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterLabel) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterAfterDate) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterBeforeDate) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: filterRelativeDate) { _, _ in scheduleDebouncedSearch() }
+        .onChange(of: selectedAccountEmail) { _, _ in scheduleDebouncedSearch() }
+        .onDisappear {
+            debounceTask?.cancel()
+        }
+    }
+}
+
+private struct AttachmentRowView: View {
+    let attachment: AttachmentRecord
+    @Environment(\.appAccentColor) private var accentColor
+
+    private static let isoFull = ISO8601DateFormatter()
+    private static let isoFrac: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let displayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.dateFormat = "EEE, dd-MMM-yy HH:mm"
+        return formatter
+    }()
+    private static let bytesFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    private var sizeText: String {
+        guard attachment.sizeBytes > 0 else { return "Unknown size" }
+        return Self.bytesFormatter.string(fromByteCount: Int64(attachment.sizeBytes))
+    }
+
+    private func dateText(_ raw: String) -> String {
+        if let date = Self.isoFrac.date(from: raw) { return Self.displayFormatter.string(from: date) }
+        if let date = Self.isoFull.date(from: raw) { return Self.displayFormatter.string(from: date) }
+        return raw
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(systemName: "paperclip")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(accentColor)
+                Text(attachment.filename)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(sizeText)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(attachment.message.subject)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            HStack(spacing: 6) {
+                Text(attachment.message.from)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(dateText(attachment.message.date))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 6) {
+                Text(attachment.mimeType.isEmpty ? "application/octet-stream" : attachment.mimeType)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(accentColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(accentColor.opacity(0.12))
+                    .clipShape(Capsule())
+
+                if !attachment.contentHash.isEmpty {
+                    Text("hash")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.08))
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
