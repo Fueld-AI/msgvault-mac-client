@@ -280,6 +280,8 @@ class EmailStore: ObservableObject {
     private static let aiModelNameKey = "search.ai.model"
     private static let liveSearchEnabledKey = "search.live.enabled"
     private static let defaultAIModelName = "qwen3.5:2b"
+    private static let defaultAttachmentQuery = "has:attachment"
+    private static let attachmentWarmCacheTTL: TimeInterval = 4 * 60 * 60
     private static let isoDateFormatterFractional: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -297,6 +299,14 @@ class EmailStore: ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter
     }()
+    private var startupPrewarmTask: Task<Void, Never>?
+    private var didRunStartupPrewarm = false
+    private var attachmentWarmupTask: Task<Void, Never>?
+    private var attachmentSearchRequestID = UUID()
+    private var lastAttachmentSearchQuery = ""
+    private var lastAttachmentSearchAt: Date?
+    private var inlineAttachmentDataURLCache: [String: String] = [:]
+    private var attachmentExportCacheByHash: [String: URL] = [:]
     
     init() {
         let defaults = UserDefaults.standard
@@ -309,6 +319,71 @@ class EmailStore: ObservableObject {
             guard let self else { return }
             await self.refreshAIRuntimeStatus()
             self.updateAISearchStatus()
+        }
+    }
+
+    func startBackgroundPrewarmIfNeeded() {
+        guard !didRunStartupPrewarm else { return }
+        guard startupPrewarmTask == nil else { return }
+
+        startupPrewarmTask = Task(priority: .utility) { [weak self] in
+            defer { Task { @MainActor in self?.startupPrewarmTask = nil } }
+            // Let the initial window become responsive first.
+            try? await Task.sleep(nanoseconds: 1_250_000_000)
+            guard let self else { return }
+
+            // Run heavy warmups sequentially to avoid overloading startup.
+            await prewarmTopSendersSilentlyIfNeeded()
+            await prewarmStatsSilentlyIfNeeded()
+            if !attachmentCacheIsFresh(for: Self.defaultAttachmentQuery) {
+                await searchAttachments(query: Self.defaultAttachmentQuery, limit: 140)
+            }
+            if mailActionInsights == nil {
+                await loadMailActionInsights()
+            }
+            didRunStartupPrewarm = true
+        }
+    }
+
+    func prewarmAttachmentsIfNeeded(force: Bool = false) {
+        let now = Date()
+        let cacheIsFresh = attachmentCacheIsFresh(for: Self.defaultAttachmentQuery, now: now)
+
+        guard force || !cacheIsFresh else { return }
+        guard attachmentWarmupTask == nil else { return }
+
+        attachmentWarmupTask = Task(priority: .utility) { [weak self] in
+            defer { Task { @MainActor in self?.attachmentWarmupTask = nil } }
+            // Let initial app startup rendering complete before heavy indexing.
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard let self else { return }
+            await self.searchAttachments(query: Self.defaultAttachmentQuery, limit: 140)
+        }
+    }
+
+    private func attachmentCacheIsFresh(for query: String, now: Date = Date()) -> Bool {
+        lastAttachmentSearchQuery.caseInsensitiveCompare(query) == .orderedSame &&
+        (lastAttachmentSearchAt.map { now.timeIntervalSince($0) < Self.attachmentWarmCacheTTL } ?? false) &&
+        !attachmentResults.isEmpty
+    }
+
+    private func prewarmStatsSilentlyIfNeeded() async {
+        guard statsInfo == nil else { return }
+        do {
+            let output = try await runMsgvaultAsync(arguments: ["stats"])
+            statsInfo = parseStats(output)
+        } catch {
+            // Silent warmup: surface errors only on explicit user refresh.
+        }
+    }
+
+    private func prewarmTopSendersSilentlyIfNeeded() async {
+        guard senders.isEmpty else { return }
+        do {
+            let output = try await runMsgvaultAsync(arguments: ["list-senders", "--json", "-n", "50"])
+            senders = parseSenders(output)
+        } catch {
+            // Silent warmup: ignore startup sender failures.
         }
     }
     
@@ -1141,6 +1216,7 @@ class EmailStore: ObservableObject {
                 if let latestStats = try? await runMsgvaultAsync(arguments: ["stats"]) {
                     statsInfo = parseStats(latestStats)
                 }
+                prewarmAttachmentsIfNeeded()
             } catch {
                 let rawMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 let cleanedMessage = Self.cleanErrorMessage(rawMessage)
@@ -1266,25 +1342,39 @@ class EmailStore: ObservableObject {
         limit: Int = 120
     ) async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestID = UUID()
+        attachmentSearchRequestID = requestID
+
         guard !trimmedQuery.isEmpty else {
-            attachmentResults = []
-            attachmentsError = nil
-            attachmentsStatus = "Add filters or keywords to search attachments."
+            if attachmentSearchRequestID == requestID {
+                attachmentResults = []
+                attachmentsError = nil
+                attachmentsStatus = "Add filters or keywords to search attachments."
+            }
             return
         }
 
         isLoadingAttachments = true
         attachmentsError = nil
         attachmentsStatus = "Searching messages with attachments..."
-        defer { isLoadingAttachments = false }
+        defer {
+            if attachmentSearchRequestID == requestID {
+                isLoadingAttachments = false
+            }
+        }
 
         do {
             let messages = try await searchRawMessages(query: trimmedQuery, limit: limit)
+            guard attachmentSearchRequestID == requestID else { return }
             let attachmentMessages = messages.filter { $0.hasAttachment }
 
             guard !attachmentMessages.isEmpty else {
-                attachmentResults = []
-                attachmentsStatus = "No messages with attachments matched your filters."
+                if attachmentSearchRequestID == requestID {
+                    attachmentResults = []
+                    attachmentsStatus = "No messages with attachments matched your filters."
+                    lastAttachmentSearchQuery = trimmedQuery
+                    lastAttachmentSearchAt = Date()
+                }
                 return
             }
 
@@ -1293,6 +1383,7 @@ class EmailStore: ObservableObject {
             collected.reserveCapacity(attachmentMessages.count * 2)
 
             for (index, message) in attachmentMessages.enumerated() {
+                guard attachmentSearchRequestID == requestID else { return }
                 do {
                     let output = try await runMsgvaultAsync(arguments: ["show-message", message.id, "--json"])
                     let parsed = parseAttachments(output: output, message: message)
@@ -1306,13 +1397,18 @@ class EmailStore: ObservableObject {
                 }
             }
 
-            attachmentResults = collected.sorted { lhs, rhs in
+            guard attachmentSearchRequestID == requestID else { return }
+
+            let sorted = collected.sorted { lhs, rhs in
                 let leftDate = parseMessageDate(lhs.message.date) ?? .distantPast
                 let rightDate = parseMessageDate(rhs.message.date) ?? .distantPast
                 if leftDate != rightDate { return leftDate > rightDate }
                 if lhs.sizeBytes != rhs.sizeBytes { return lhs.sizeBytes > rhs.sizeBytes }
                 return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
             }
+            attachmentResults = sorted
+            lastAttachmentSearchQuery = trimmedQuery
+            lastAttachmentSearchAt = Date()
 
             if attachmentResults.isEmpty {
                 attachmentsStatus = "Matched messages had attachments, but no attachment metadata was returned."
@@ -1320,6 +1416,7 @@ class EmailStore: ObservableObject {
                 attachmentsStatus = "Found \(attachmentResults.count) attachment\(attachmentResults.count == 1 ? "" : "s")."
             }
         } catch {
+            guard attachmentSearchRequestID == requestID else { return }
             attachmentResults = []
             let raw = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             attachmentsError = Self.cleanErrorMessage(raw)
@@ -1600,7 +1697,10 @@ class EmailStore: ObservableObject {
             let output = try await runMsgvaultAsync(arguments: ["show-message", id, "--json"])
             if let detail = parseMessageDetail(output) {
                 messageDetail = detail.bodyText
-                messageDetailHTML = detail.bodyHTML
+                messageDetailHTML = await hydrateInlineCIDImages(
+                    in: detail.bodyHTML,
+                    inlineRefs: detail.inlineAttachmentRefs
+                )
                 if let current = selectedMessage, current.id == id {
                     selectedMessage = mergedMessage(current, with: detail)
                 }
@@ -1630,7 +1730,11 @@ class EmailStore: ObservableObject {
         do {
             let output = try await runMsgvaultAsync(arguments: ["show-message", message.id, "--json"])
             if let detail = parseMessageDetail(output) {
-                return (mergedMessage(message, with: detail), detail.bodyText, detail.bodyHTML)
+                let hydratedHTML = await hydrateInlineCIDImages(
+                    in: detail.bodyHTML,
+                    inlineRefs: detail.inlineAttachmentRefs
+                )
+                return (mergedMessage(message, with: detail), detail.bodyText, hydratedHTML)
             }
             return (message, output, nil)
         } catch {
@@ -1769,6 +1873,56 @@ class EmailStore: ObservableObject {
             return Int(digits) ?? 0
         }
         return 0
+    }
+
+    private func sanitizedAttachmentFilename(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = "attachment.bin"
+        guard !trimmed.isEmpty else { return fallback }
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+        let cleanedScalars = trimmed.unicodeScalars.map { scalar -> Character in
+            invalid.contains(scalar) ? "_" : Character(scalar)
+        }
+        let cleaned = String(cleanedScalars).trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? fallback : cleaned
+    }
+
+    private func defaultFilename(for attachment: AttachmentRecord) -> String {
+        let base = sanitizedAttachmentFilename(attachment.filename)
+        let hashPrefix = attachment.contentHash.isEmpty ? "attachment" : String(attachment.contentHash.prefix(10))
+        if base.lowercased().hasSuffix(".bin") || base.contains(".") {
+            return "\(hashPrefix)-\(base)"
+        }
+        return "\(hashPrefix)-\(base).bin"
+    }
+
+    func exportAttachment(_ attachment: AttachmentRecord, to outputURL: URL) async throws {
+        let hash = attachment.contentHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !hash.isEmpty else {
+            throw MsgVaultError.commandFailed("Attachment content hash is unavailable for this item.")
+        }
+        _ = try await runMsgvaultAsync(arguments: ["export-attachment", hash, "-o", outputURL.path])
+    }
+
+    func materializeAttachmentForOpen(_ attachment: AttachmentRecord) async throws -> URL {
+        let hash = attachment.contentHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !hash.isEmpty else {
+            throw MsgVaultError.commandFailed("Attachment content hash is unavailable for this item.")
+        }
+
+        if let cached = attachmentExportCacheByHash[hash],
+           FileManager.default.fileExists(atPath: cached.path) {
+            return cached
+        }
+
+        let exportsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MsgVaultAttachmentExports", isDirectory: true)
+        try FileManager.default.createDirectory(at: exportsDir, withIntermediateDirectories: true)
+
+        let outputURL = exportsDir.appendingPathComponent(defaultFilename(for: attachment), isDirectory: false)
+        try await exportAttachment(attachment, to: outputURL)
+        attachmentExportCacheByHash[hash] = outputURL
+        return outputURL
     }
     
     private func parseSearchResults(_ output: String) -> [EmailMessage] {
@@ -1971,6 +2125,7 @@ class EmailStore: ObservableObject {
     private struct MessageDetailPayload {
         let bodyText: String
         let bodyHTML: String?
+        let inlineAttachmentRefs: [InlineAttachmentRef]
         let gmailMessageID: String?
         let from: String
         let to: String
@@ -1982,6 +2137,12 @@ class EmailStore: ObservableObject {
         let hasAttachment: Bool
         let threadID: String?
         let sizeEstimate: Int
+    }
+
+    private struct InlineAttachmentRef {
+        let contentID: String
+        let contentHash: String
+        let mimeType: String
     }
     
     private func parseMessageDetail(_ output: String) -> MessageDetailPayload? {
@@ -2033,11 +2194,13 @@ class EmailStore: ObservableObject {
                 }
                 return nil
             }()
+        let inlineAttachmentRefs = parseInlineAttachmentRefs(from: json)
+        let rawDetailAttachments = (json["attachments"] as? [Any]) ?? (json["attachment"] as? [Any]) ?? []
         let hasAttachmentValue =
             (json["has_attachment"] as? Bool ?? false) ||
             (json["has_attachments"] as? Bool ?? false) ||
             ((json["attachment_count"] as? Int ?? 0) > 0) ||
-            ((json["attachments"] as? [[String: Any]])?.isEmpty == false)
+            !rawDetailAttachments.isEmpty
         let threadIDValue: String? =
             (json["thread_id"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2058,6 +2221,7 @@ class EmailStore: ObservableObject {
         return MessageDetailPayload(
             bodyText: effectiveText,
             bodyHTML: bodyHTML,
+            inlineAttachmentRefs: inlineAttachmentRefs,
             gmailMessageID: gmailMessageIDValue,
             from: fromValue,
             to: toValue,
@@ -2070,6 +2234,138 @@ class EmailStore: ObservableObject {
             threadID: threadIDValue,
             sizeEstimate: sizeEstimateValue
         )
+    }
+
+    private func parseInlineAttachmentRefs(from json: [String: Any]) -> [InlineAttachmentRef] {
+        let rawAttachments = (json["attachments"] as? [Any]) ?? (json["attachment"] as? [Any]) ?? []
+        var refs: [InlineAttachmentRef] = []
+        var seen = Set<String>()
+
+        for raw in rawAttachments {
+            guard let entry = raw as? [String: Any] else { continue }
+            guard let contentHash = normalizedAttachmentString(
+                entry["content_hash"] ??
+                entry["hash"] ??
+                entry["sha256"]
+            ) else { continue }
+            guard let cid = normalizeCID(
+                normalizedAttachmentString(
+                    entry["content_id"] ??
+                    entry["cid"] ??
+                    entry["contentId"] ??
+                    entry["id"]
+                )
+            ) else { continue }
+
+            let dedupeKey = "\(cid.lowercased())::\(contentHash.lowercased())"
+            guard seen.insert(dedupeKey).inserted else { continue }
+
+            let mimeType = normalizedAttachmentString(
+                entry["mime_type"] ??
+                entry["content_type"] ??
+                entry["mime"] ??
+                entry["type"]
+            ) ?? "application/octet-stream"
+
+            refs.append(
+                InlineAttachmentRef(
+                    contentID: cid,
+                    contentHash: contentHash,
+                    mimeType: mimeType
+                )
+            )
+        }
+        return refs
+    }
+
+    private func normalizeCID(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.lowercased().hasPrefix("cid:") {
+            value = String(value.dropFirst(4))
+        }
+        if value.hasPrefix("<"), value.hasSuffix(">"), value.count >= 2 {
+            value = String(value.dropFirst().dropLast())
+        }
+        value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func parseAttachmentDataURL(from output: String, fallbackMimeType: String) -> String? {
+        let cleanedOutput = extractJSONObjectString(from: output) ?? output
+        guard let data = cleanedOutput.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let base64Candidates = [
+            json["base64"],
+            json["data"],
+            json["content_base64"],
+            json["payload"]
+        ]
+        let base64Value = base64Candidates
+            .compactMap { $0 as? String }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        let mimeCandidates = [
+            json["mime_type"],
+            json["content_type"],
+            json["mime"],
+            json["type"]
+        ]
+        let mimeValue = mimeCandidates
+            .compactMap { $0 as? String }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            ?? fallbackMimeType
+
+        guard let base64Value else { return nil }
+        let compactBase64 = base64Value
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+        guard !compactBase64.isEmpty else { return nil }
+        return "data:\(mimeValue);base64,\(compactBase64)"
+    }
+
+    private func replaceCIDReferences(in html: String, cid: String, with dataURL: String) -> String {
+        let escapedCID = NSRegularExpression.escapedPattern(for: cid)
+        let pattern = "(?i)cid:\\s*<?\(escapedCID)>?"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return html
+        }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.stringByReplacingMatches(in: html, options: [], range: range, withTemplate: dataURL)
+    }
+
+    private func hydrateInlineCIDImages(
+        in bodyHTML: String?,
+        inlineRefs: [InlineAttachmentRef]
+    ) async -> String? {
+        guard var html = bodyHTML, !html.isEmpty else { return bodyHTML }
+        guard html.range(of: "cid:", options: .caseInsensitive) != nil else { return bodyHTML }
+        guard !inlineRefs.isEmpty else { return bodyHTML }
+
+        for ref in inlineRefs {
+            let cacheKey = ref.contentHash.lowercased()
+            let dataURL: String?
+            if let cached = inlineAttachmentDataURLCache[cacheKey] {
+                dataURL = cached
+            } else {
+                do {
+                    let output = try await runMsgvaultAsync(arguments: ["export-attachment", ref.contentHash, "--json"])
+                    let parsed = parseAttachmentDataURL(from: output, fallbackMimeType: ref.mimeType)
+                    if let parsed {
+                        inlineAttachmentDataURLCache[cacheKey] = parsed
+                    }
+                    dataURL = parsed
+                } catch {
+                    dataURL = nil
+                }
+            }
+            guard let dataURL else { continue }
+            html = replaceCIDReferences(in: html, cid: ref.contentID, with: dataURL)
+        }
+        return html
     }
 
     private func mergedMessage(_ base: EmailMessage, with detail: MessageDetailPayload) -> EmailMessage {

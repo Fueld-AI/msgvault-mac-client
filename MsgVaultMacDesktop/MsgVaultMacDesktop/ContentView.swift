@@ -26,8 +26,8 @@ struct ContentView: View {
     
     enum SidebarTab: String, CaseIterable {
         case search = "Search"
-        case attachments = "Attachments"
         case senders = "Sender Search"
+        case attachments = "Attachments"
         case stats = "Stats"
         case accounts = "Accounts"
         case settings = "Settings"
@@ -149,10 +149,10 @@ struct ContentView: View {
                 switch selectedTab {
                 case .search:
                     SearchView()
-                case .attachments:
-                    AttachmentsView()
                 case .senders:
                     SendersView()
+                case .attachments:
+                    AttachmentsView()
                 case .stats:
                     StatsView()
                 case .accounts:
@@ -203,6 +203,7 @@ struct ContentView: View {
                 await store.loadAccounts()
             }
             routeStartupTabIfNeeded()
+            store.startBackgroundPrewarmIfNeeded()
         }
         .onChange(of: store.accounts) { _, _ in
             defaultSettingsToVaultSetup = store.accounts.isEmpty
@@ -314,6 +315,7 @@ struct ContentView: View {
         Task {
             await store.loadAccounts()
             await store.loadStats()
+            store.startBackgroundPrewarmIfNeeded()
         }
     }
 
@@ -1968,6 +1970,8 @@ struct AttachmentsView: View {
     @State private var localTypeFilter: AttachmentTypeFilter = .all
     @State private var localSizeFilter: AttachmentSizePreset = .none
     @State private var debounceTask: Task<Void, Never>?
+    @State private var isRunningAttachmentAction = false
+    @State private var attachmentActionError: String?
 
     private static let queryDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -2184,6 +2188,11 @@ struct AttachmentsView: View {
             .sorted { $0.count > $1.count }
     }
 
+    private var selectedAttachment: AttachmentRecord? {
+        guard let selectedAttachmentId else { return nil }
+        return displayedAttachments.first(where: { $0.id == selectedAttachmentId })
+    }
+
     private func queryDateString(_ date: Date) -> String {
         Self.queryDateFormatter.string(from: date)
     }
@@ -2377,6 +2386,58 @@ struct AttachmentsView: View {
         localMimeFilter = ""
         localTypeFilter = .all
         localSizeFilter = .none
+    }
+
+    private func attachmentDisplaySize(_ attachment: AttachmentRecord) -> String {
+        guard attachment.sizeBytes > 0 else { return "Unknown size" }
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(attachment.sizeBytes))
+    }
+
+    private func runAttachmentAction(_ operation: @escaping () async throws -> Void) {
+        attachmentActionError = nil
+        isRunningAttachmentAction = true
+        Task {
+            defer { isRunningAttachmentAction = false }
+            do {
+                try await operation()
+            } catch {
+                attachmentActionError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
+    }
+
+    private func openSelectedAttachment() {
+        guard let attachment = selectedAttachment else { return }
+        runAttachmentAction {
+            let url = try await store.materializeAttachmentForOpen(attachment)
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func revealSelectedAttachmentInFinder() {
+        guard let attachment = selectedAttachment else { return }
+        runAttachmentAction {
+            let url = try await store.materializeAttachmentForOpen(attachment)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+    }
+
+    private func saveSelectedAttachmentAs() {
+        guard let attachment = selectedAttachment else { return }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = attachment.filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "attachment.bin"
+            : attachment.filename
+        guard panel.runModal() == .OK, let destinationURL = panel.url else { return }
+
+        runAttachmentAction {
+            try await store.exportAttachment(attachment, to: destinationURL)
+        }
     }
 
     var body: some View {
@@ -2677,6 +2738,7 @@ struct AttachmentsView: View {
                         }
                         .listStyle(.inset)
                         .onChange(of: selectedAttachmentId) { _, newID in
+                            attachmentActionError = nil
                             guard let newID,
                                   let selected = displayedAttachments.first(where: { $0.id == newID }) else { return }
                             store.selectedMessage = selected.message
@@ -2700,15 +2762,101 @@ struct AttachmentsView: View {
 
                 Divider()
 
-                MessageDetailView()
-                    .frame(minWidth: 350, idealWidth: 500, maxWidth: .infinity)
+                VStack(spacing: 0) {
+                    if let selectedAttachment {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Image(systemName: "paperclip.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(accentColor)
+                                Text(selectedAttachment.filename)
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(attachmentDisplaySize(selectedAttachment))
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            HStack(spacing: 8) {
+                                Text(selectedAttachment.mimeType.isEmpty ? "application/octet-stream" : selectedAttachment.mimeType)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(accentColor)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(accentColor.opacity(0.12))
+                                    .clipShape(Capsule())
+
+                                if !selectedAttachment.contentHash.isEmpty {
+                                    Text("hash available")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Color.primary.opacity(0.08))
+                                        .clipShape(Capsule())
+                                }
+                            }
+
+                            HStack(spacing: 8) {
+                                Button("Open Attachment") {
+                                    openSelectedAttachment()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .tint(accentColor)
+                                .disabled(isRunningAttachmentAction || selectedAttachment.contentHash.isEmpty)
+
+                                Button("Reveal in Finder") {
+                                    revealSelectedAttachmentInFinder()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(isRunningAttachmentAction || selectedAttachment.contentHash.isEmpty)
+
+                                Button("Save As…") {
+                                    saveSelectedAttachmentAs()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(isRunningAttachmentAction || selectedAttachment.contentHash.isEmpty)
+
+                                if isRunningAttachmentAction {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
+
+                            if selectedAttachment.contentHash.isEmpty {
+                                Text("This item has no content hash metadata, so file export is unavailable.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if let attachmentActionError, !attachmentActionError.isEmpty {
+                                Label(attachmentActionError, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.bar)
+
+                        Divider()
+                    }
+
+                    MessageDetailView()
+                        .frame(minWidth: 350, idealWidth: 500, maxWidth: .infinity)
+                }
             }
         }
         .task {
             if store.accounts.isEmpty {
                 await store.loadAccounts()
             }
-            if store.attachmentResults.isEmpty {
+            store.prewarmAttachmentsIfNeeded()
+            if store.attachmentResults.isEmpty && !store.isLoadingAttachments {
                 runSearch()
             }
         }
@@ -4282,6 +4430,7 @@ private struct MessageHTMLView: NSViewRepresentable {
                 img { max-width: 100% !important; height: auto !important; }
                 table { max-width: 100% !important; }
                 a { color: #0077cc; }
+                img[src^="cid:"], img[src^="CID:"] { display: none !important; }
             </style>
             \(emailStyles)
         </head>
