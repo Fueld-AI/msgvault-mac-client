@@ -1,0 +1,13 @@
+<svg width="64" height="64" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MsgVault favicon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="currentColor" stop-opacity="1"/>
+      <stop offset="100%" stop-color="currentColor" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+  <rect x="88" y="88" width="848" height="848" rx="184" fill="url(#bg)"/>
+  <rect x="248" y="320" width="474" height="304" rx="36" fill="none" stroke="#ffffff" stroke-width="38" stroke-linejoin="round"/>
+  <path d="M258 344 L484 518 L710 344" fill="none" stroke="#ffffff" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="692" cy="642" r="100" fill="none" stroke="#ffffff" stroke-width="38"/>
+  <path d="M768 718 L850 800" fill="none" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+</svg>

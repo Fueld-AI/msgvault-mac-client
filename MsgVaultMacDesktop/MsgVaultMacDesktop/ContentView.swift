@@ -10,6 +10,40 @@ func formatLabel(_ key: String) -> String {
     return first.uppercased() + spaced.dropFirst().lowercased()
 }
 
+private struct MsgVaultBrandMark: View {
+    @Environment(\.appAccentColor) private var accentColor
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [accentColor.opacity(0.95), accentColor.opacity(0.74)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            Image(systemName: "envelope")
+                .font(.system(size: size * 0.48, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.95))
+                .offset(x: -size * 0.03, y: -size * 0.02)
+
+            ZStack {
+                Circle()
+                    .fill(accentColor.opacity(0.35))
+                    .frame(width: size * 0.26, height: size * 0.26)
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: size * 0.18, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.95))
+            }
+            .offset(x: size * 0.24, y: size * 0.18)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.colorScheme) private var colorScheme
@@ -23,6 +57,7 @@ struct ContentView: View {
     @State private var didRunInitialSetupCheck = false
     @State private var didRouteStartupTab = false
     @State private var defaultSettingsToVaultSetup = false
+    @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     
     enum SidebarTab: String, CaseIterable {
         case search = "Search"
@@ -57,6 +92,10 @@ struct ContentView: View {
     private var setupConfigPath: String {
         "\(RuntimePaths.realUserHomePath())/.msgvault/config.toml"
     }
+
+    private var sidebarWidth: CGFloat {
+        sidebarCollapsed ? 68 : 180
+    }
     
     var body: some View {
         ZStack {
@@ -65,28 +104,38 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     // Brand header
                     HStack(spacing: 8) {
-                        Image(systemName: "envelope.badge.shield.half.filled")
-                            .font(.title2)
-                            .foregroundStyle(accentColor)
-                        Text("MsgVault")
-                            .font(.title3.bold())
-                            .foregroundStyle(.primary)
+                        MsgVaultBrandMark(size: sidebarCollapsed ? 30 : 34)
+                        if !sidebarCollapsed {
+                            Text("MsgVault")
+                                .font(.title3.bold())
+                                .foregroundStyle(.primary)
+                        }
                     }
                     .padding(.vertical, 16)
-                    .padding(.horizontal)
+                    .padding(.horizontal, sidebarCollapsed ? 8 : 14)
+                    .frame(maxWidth: .infinity, alignment: sidebarCollapsed ? .center : .leading)
                     
                     Divider()
                     
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: sidebarCollapsed ? .center : .leading, spacing: 2) {
                         ForEach(SidebarTab.allCases, id: \.self) { tab in
                             Button {
                                 selectedTab = tab
                             } label: {
-                                Label(tab.rawValue, systemImage: tab.icon)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 9)
-                                    .contentShape(Rectangle())
+                                Group {
+                                    if sidebarCollapsed {
+                                        Image(systemName: tab.icon)
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .frame(maxWidth: .infinity, alignment: .center)
+                                            .padding(.vertical, 9)
+                                    } else {
+                                        Label(tab.rawValue, systemImage: tab.icon)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 9)
+                                    }
+                                }
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .background(
@@ -102,12 +151,34 @@ struct ContentView: View {
                             )
                             .foregroundStyle(selectedTab == tab ? .white : .primary)
                             .clipShape(RoundedRectangle(cornerRadius: 9))
+                            .help(tab.rawValue)
                         }
                     }
                     .padding(.horizontal, 8)
                     .padding(.top, 8)
                     
                     Spacer()
+
+                    Button {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                            sidebarCollapsed.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 0) {
+                            Image(systemName: sidebarCollapsed ? "chevron.right" : "chevron.left")
+                                .font(.system(size: 10, weight: .bold))
+                            Image(systemName: sidebarCollapsed ? "chevron.right" : "chevron.left")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .foregroundStyle(accentColor.opacity(0.9))
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.trailing, 6)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 8)
+                    .help(sidebarCollapsed ? "Expand sidebar" : "Collapse to icons")
                     
                     Divider()
                     
@@ -115,33 +186,49 @@ struct ContentView: View {
                         Button {
                             store.refreshEmailInBackground()
                         } label: {
-                            HStack(spacing: 6) {
-                                if store.isRefreshingEmail {
-                                    ProgressView()
-                                        .controlSize(.small)
+                            Group {
+                                if sidebarCollapsed {
+                                    ZStack {
+                                        if store.isRefreshingEmail {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Image(systemName: "arrow.triangle.2.circlepath")
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .center)
                                 } else {
-                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                    HStack(spacing: 6) {
+                                        if store.isRefreshingEmail {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Image(systemName: "arrow.triangle.2.circlepath")
+                                        }
+                                        Text(store.isRefreshingEmail ? "Refreshing..." : "Refresh Email")
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                                Text(store.isRefreshingEmail ? "Refreshing..." : "Refresh Email")
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .tint(accentColor)
                         .disabled(store.isRefreshingEmail)
                         .help("Sync emails from server in background")
-                        
+
                         Text(store.emailRefreshError ?? store.emailRefreshStatus)
                             .font(.caption2)
                             .foregroundColor(store.emailRefreshError == nil ? .secondary : .red)
                             .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                            .opacity(sidebarCollapsed ? 0 : 1)
                     }
                     .padding(10)
                 }
-                .frame(width: 180)
+                .frame(width: sidebarWidth)
                 .background(.bar)
+                .animation(.spring(response: 0.35, dampingFraction: 0.86), value: sidebarCollapsed)
                 
                 Divider()
                 
@@ -353,7 +440,7 @@ struct SearchView: View {
     @State private var filterLabel = ""
     @State private var selectedAccountEmail = ""
     @State private var searchScope: SearchScope = .everything
-    @State private var aiAssistEnabled = true
+    @State private var aiAssistEnabled = false
     @State private var translatedQueryPreview: String?
     @State private var translatedQueryJSONPreview: String?
     @State private var recentQueries: [String] = Self.loadRecentQueries()
@@ -1949,7 +2036,7 @@ struct SearchView: View {
 
 // MARK: - Attachments View
 
-struct AttachmentsView: View {
+private struct LegacyAttachmentsView: View {
     @EnvironmentObject var store: EmailStore
     @Environment(\.appAccentColor) private var accentColor
 
@@ -2964,7 +3051,7 @@ private struct AttachmentRowView: View {
     }
 }
 
-private struct FilterField: View {
+struct FilterField: View {
     let label: String
     let placeholder: String
     @Binding var text: String
@@ -3024,7 +3111,7 @@ private struct FilterField: View {
     }
 }
 
-private struct DateFilterField: View {
+struct DateFilterField: View {
     let label: String
     @Binding var date: Date?
     let icon: String
@@ -3524,7 +3611,7 @@ private struct ExpandedCalendarView: View {
     }
 }
 
-private struct DateRangeConnector: View {
+struct DateRangeConnector: View {
     var body: some View {
         VStack {
             Spacer(minLength: 0)
@@ -3749,7 +3836,7 @@ private struct LabelPickerPopoverContent: View {
 }
 
 /// Drop-in replacement for FilterField that opens the label picker popover.
-private struct FilterFieldLabelPicker: View {
+struct FilterFieldLabelPicker: View {
     @Binding var selectedLabel: String
     var onSelect: (() -> Void)? = nil
     /// When provided, the picker shows only labels present in the current result set.

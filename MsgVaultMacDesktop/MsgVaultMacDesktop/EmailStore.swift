@@ -442,7 +442,8 @@ class EmailStore: ObservableObject {
     
     private func runMsgvaultAsync(
         arguments: [String],
-        timeoutSeconds: TimeInterval? = nil
+        timeoutSeconds: TimeInterval? = nil,
+        workingDirectoryURL: URL? = nil
     ) async throws -> String {
         var lastError: Error?
         for executable in msgvaultExecutableCandidates() {
@@ -450,7 +451,8 @@ class EmailStore: ObservableObject {
                 let output = try await Self.executeCommand(
                     path: executable,
                     arguments: msgvaultInvocationArguments(for: executable, commandArguments: arguments),
-                    timeoutSeconds: timeoutSeconds
+                    timeoutSeconds: timeoutSeconds,
+                    workingDirectoryURL: workingDirectoryURL
                 )
                 if executable != "/usr/bin/env" {
                     msgvaultPath = executable
@@ -495,7 +497,8 @@ class EmailStore: ObservableObject {
     nonisolated private static func executeCommand(
         path: String,
         arguments: [String],
-        timeoutSeconds: TimeInterval? = nil
+        timeoutSeconds: TimeInterval? = nil,
+        workingDirectoryURL: URL? = nil
     ) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
@@ -507,6 +510,9 @@ class EmailStore: ObservableObject {
             process.standardError = outputPipe
             
             process.environment = RuntimePaths.processEnvironmentForUserHome()
+            if let workingDirectoryURL {
+                process.currentDirectoryURL = workingDirectoryURL
+            }
             
             try process.run()
             
@@ -1901,7 +1907,27 @@ class EmailStore: ObservableObject {
         guard !hash.isEmpty else {
             throw MsgVaultError.commandFailed("Attachment content hash is unavailable for this item.")
         }
-        _ = try await runMsgvaultAsync(arguments: ["export-attachment", hash, "-o", outputURL.path])
+        let directoryURL = outputURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        do {
+            _ = try await runMsgvaultAsync(
+                arguments: ["export-attachment", hash, "-o", outputURL.lastPathComponent],
+                workingDirectoryURL: directoryURL
+            )
+            return
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if !message.lowercased().contains("is absolute, use a relative path") {
+                throw error
+            }
+        }
+
+        // Fallback for stricter msgvault builds: export to JSON/base64 and write bytes ourselves.
+        let jsonOutput = try await runMsgvaultAsync(arguments: ["export-attachment", hash, "--json"])
+        guard let data = parseAttachmentBinaryData(from: jsonOutput) else {
+            throw MsgVaultError.commandFailed("Attachment export fallback failed: unable to decode binary payload.")
+        }
+        try data.write(to: outputURL, options: [.atomic])
     }
 
     func materializeAttachmentForOpen(_ attachment: AttachmentRecord) async throws -> URL {
@@ -1923,6 +1949,91 @@ class EmailStore: ObservableObject {
         try await exportAttachment(attachment, to: outputURL)
         attachmentExportCacheByHash[hash] = outputURL
         return outputURL
+    }
+
+    func materializeAttachmentsForOpen(_ attachments: [AttachmentRecord]) async -> (urls: [URL], failures: [String]) {
+        var urls: [URL] = []
+        var failures: [String] = []
+        var seenURLPaths = Set<String>()
+
+        for attachment in attachments {
+            do {
+                let url = try await materializeAttachmentForOpen(attachment)
+                if seenURLPaths.insert(url.path).inserted {
+                    urls.append(url)
+                }
+            } catch {
+                let label = attachment.filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? attachment.id
+                    : attachment.filename
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                failures.append("\(label): \(reason)")
+            }
+        }
+        return (urls, failures)
+    }
+
+    func exportAttachments(
+        _ attachments: [AttachmentRecord],
+        to directoryURL: URL
+    ) async -> (exportedURLs: [URL], failures: [String]) {
+        var exportedURLs: [URL] = []
+        var failures: [String] = []
+        var reservedLowercasedNames = Set<String>()
+
+        for attachment in attachments {
+            let preferredName = defaultFilename(for: attachment)
+            let outputURL = uniqueAttachmentOutputURL(
+                in: directoryURL,
+                preferredFilename: preferredName,
+                reservedNamesLowercased: &reservedLowercasedNames
+            )
+            do {
+                try await exportAttachment(attachment, to: outputURL)
+                exportedURLs.append(outputURL)
+            } catch {
+                let label = attachment.filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? attachment.id
+                    : attachment.filename
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                failures.append("\(label): \(reason)")
+            }
+        }
+
+        return (exportedURLs, failures)
+    }
+
+    private func uniqueAttachmentOutputURL(
+        in directoryURL: URL,
+        preferredFilename: String,
+        reservedNamesLowercased: inout Set<String>
+    ) -> URL {
+        let sanitizedBase = sanitizedAttachmentFilename(preferredFilename)
+        let nsBase = sanitizedBase as NSString
+        let stem = nsBase.deletingPathExtension.isEmpty ? sanitizedBase : nsBase.deletingPathExtension
+        let ext = nsBase.pathExtension
+
+        var candidate = sanitizedBase
+        var suffix = 2
+
+        func exists(_ fileName: String) -> Bool {
+            let lower = fileName.lowercased()
+            if reservedNamesLowercased.contains(lower) { return true }
+            let url = directoryURL.appendingPathComponent(fileName, isDirectory: false)
+            return FileManager.default.fileExists(atPath: url.path)
+        }
+
+        while exists(candidate) {
+            if ext.isEmpty {
+                candidate = "\(stem)-\(suffix)"
+            } else {
+                candidate = "\(stem)-\(suffix).\(ext)"
+            }
+            suffix += 1
+        }
+
+        reservedNamesLowercased.insert(candidate.lowercased())
+        return directoryURL.appendingPathComponent(candidate, isDirectory: false)
     }
     
     private func parseSearchResults(_ output: String) -> [EmailMessage] {
@@ -2325,6 +2436,33 @@ class EmailStore: ObservableObject {
             .joined()
         guard !compactBase64.isEmpty else { return nil }
         return "data:\(mimeValue);base64,\(compactBase64)"
+    }
+
+    private func parseAttachmentBinaryData(from output: String) -> Data? {
+        let cleanedOutput = extractJSONObjectString(from: output) ?? output
+        guard let rawData = cleanedOutput.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any] else {
+            return nil
+        }
+
+        let candidates = [
+            json["base64"],
+            json["data"],
+            json["content_base64"],
+            json["payload"]
+        ]
+
+        guard let base64Value = candidates
+            .compactMap({ $0 as? String })
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            return nil
+        }
+
+        let compactBase64 = base64Value
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+        guard !compactBase64.isEmpty else { return nil }
+        return Data(base64Encoded: compactBase64)
     }
 
     private func replaceCIDReferences(in html: String, cid: String, with dataURL: String) -> String {
