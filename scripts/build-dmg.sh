@@ -88,16 +88,64 @@ shopt -u nullglob
 APP_PATH="${apps[0]}"
 APP_NAME="$(basename "$APP_PATH")"
 
+# ── Inject a complete AppIcon.icns built via iconutil ─────────────────────
+# actool sometimes rejects large PNG sizes; iconutil is always reliable.
+log "Building full AppIcon.icns via iconutil and injecting into app bundle"
+ICON_SRC="$ROOT_DIR/MsgVaultMacDesktop/MsgVaultMacDesktop/Assets.xcassets/AppIcon.appiconset"
+ICONSET_TMP="$BUILD_DIR/AppIcon.iconset"
+ICNS_TMP="$BUILD_DIR/AppIcon.icns"
+rm -rf "$ICONSET_TMP" && mkdir -p "$ICONSET_TMP"
+
+sips -z 16   16   "$ICON_SRC/icon-16.png"   --out "$ICONSET_TMP/icon_16x16.png"    >/dev/null
+sips -z 32   32   "$ICON_SRC/icon-32.png"   --out "$ICONSET_TMP/icon_16x16@2x.png" >/dev/null
+sips -z 32   32   "$ICON_SRC/icon-32.png"   --out "$ICONSET_TMP/icon_32x32.png"    >/dev/null
+sips -z 64   64   "$ICON_SRC/icon-64.png"   --out "$ICONSET_TMP/icon_32x32@2x.png" >/dev/null
+sips -z 128  128  "$ICON_SRC/icon-128.png"  --out "$ICONSET_TMP/icon_128x128.png"  >/dev/null
+sips -z 256  256  "$ICON_SRC/icon-256.png"  --out "$ICONSET_TMP/icon_128x128@2x.png" >/dev/null
+sips -z 256  256  "$ICON_SRC/icon-256.png"  --out "$ICONSET_TMP/icon_256x256.png"  >/dev/null
+sips -z 512  512  "$ICON_SRC/icon-512.png"  --out "$ICONSET_TMP/icon_256x256@2x.png" >/dev/null
+sips -z 512  512  "$ICON_SRC/icon-512.png"  --out "$ICONSET_TMP/icon_512x512.png"  >/dev/null
+sips -z 1024 1024 "$ICON_SRC/icon-1024.png" --out "$ICONSET_TMP/icon_512x512@2x.png" >/dev/null
+
+iconutil -c icns "$ICONSET_TMP" -o "$ICNS_TMP"
+
+ICNS_DEST="$APP_PATH/Contents/Resources/AppIcon.icns"
+cp "$ICNS_TMP" "$ICNS_DEST"
+log "AppIcon.icns replaced ($(wc -c <"$ICNS_TMP" | tr -d ' ') bytes)"
+
+# Re-sign the app with the new icon injected
+SIGN_ID="$(security find-identity -v -p codesigning | grep 'Developer ID Application' | head -1 | sed -E 's/.*\) //' | sed 's/ .*//')"
+if [[ -n "$SIGN_ID" ]]; then
+  log "Re-signing app after icon injection: $SIGN_ID"
+  codesign --force --deep --sign "$SIGN_ID" -o runtime "$APP_PATH"
+else
+  log "No Developer ID cert found — skipping re-sign (development build)"
+fi
+
 log "Staging app for DMG: $APP_NAME"
 mkdir -p "$DMG_STAGE_PATH"
 cp -R "$APP_PATH" "$DMG_STAGE_PATH/"
 
-log "Creating DMG"
-hdiutil create \
-  -volname "$SCHEME" \
-  -srcfolder "$DMG_STAGE_PATH" \
-  -ov -format UDZO \
-  "$DMG_PATH"
+log "Generating DMG background image"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKGROUND_IMG="$SCRIPTS_DIR/dmg-background.png"
+python3 "$SCRIPTS_DIR/generate-dmg-background.py"
+
+log "Creating DMG with installer window"
+# Icon centres (px) within the 660×400 window:
+#   App icon      x=165, y=185
+#   Applications  x=495, y=185
+create-dmg \
+  --volname "$SCHEME" \
+  --background "$BACKGROUND_IMG" \
+  --window-pos 200 120 \
+  --window-size 660 400 \
+  --icon-size 120 \
+  --icon "$APP_NAME" 165 185 \
+  --hide-extension "$APP_NAME" \
+  --app-drop-link 495 185 \
+  "$DMG_PATH" \
+  "$DMG_STAGE_PATH/"
 
 if [[ "$NOTARIZE" == "1" ]]; then
   log "Submitting DMG for notarization using profile '$NOTARY_PROFILE'"
