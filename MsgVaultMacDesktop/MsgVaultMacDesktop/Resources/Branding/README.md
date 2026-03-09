@@ -9,6 +9,7 @@ Notes:
 - Keep transparent backgrounds for best results in both light and dark themes.
 
 MsgVault brand source assets:
+- msgvault-mark-2048.png
 - msgvault-mark.svg
 - msgvault-mark-1024.png
 - msgvault-mark-512.png

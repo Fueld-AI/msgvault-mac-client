@@ -10,37 +10,69 @@ func formatLabel(_ key: String) -> String {
     return first.uppercased() + spaced.dropFirst().lowercased()
 }
 
+/// Vector brand mark — drawn entirely with SwiftUI Canvas so it scales to any
+/// size and recolours automatically with the active app theme accent colour.
 private struct MsgVaultBrandMark: View {
     @Environment(\.appAccentColor) private var accentColor
     let size: CGFloat
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [accentColor.opacity(0.95), accentColor.opacity(0.74)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            // Flat background square
+            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                .fill(accentColor)
 
-            Image(systemName: "envelope")
-                .font(.system(size: size * 0.48, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.95))
-                .offset(x: -size * 0.03, y: -size * 0.02)
+            // Glyph drawn as pure vector paths — no image assets
+            Canvas { ctx, cs in
+                let w = cs.width, h = cs.height
+                let sw: CGFloat = w * 0.053   // stroke weight
 
-            ZStack {
-                Circle()
-                    .fill(accentColor.opacity(0.35))
-                    .frame(width: size * 0.26, height: size * 0.26)
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: size * 0.18, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.95))
+                // ── Envelope body ───────────────────────────────────────────
+                let ex0 = w * 0.125, ey0 = h * 0.191
+                let ex1 = w * 0.752, ey1 = h * 0.600
+                let envPath = Path(roundedRect: CGRect(x: ex0, y: ey0,
+                                                       width: ex1 - ex0,
+                                                       height: ey1 - ey0),
+                                   cornerRadius: w * 0.043)
+                ctx.stroke(envPath, with: .color(.white), lineWidth: sw)
+
+                // ── V-flap (starts half-stroke inside the top edge) ─────────
+                var flap = Path()
+                flap.move(to:    CGPoint(x: ex0 + w * 0.043, y: ey0 + sw * 0.5))
+                flap.addLine(to: CGPoint(x: (ex0 + ex1) * 0.5, y: ey0 + (ey1 - ey0) * 0.50))
+                flap.addLine(to: CGPoint(x: ex1 - w * 0.043, y: ey0 + sw * 0.5))
+                ctx.stroke(flap, with: .color(.white),
+                           style: StrokeStyle(lineWidth: sw,
+                                             lineCap: .round,
+                                             lineJoin: .round))
+
+                // ── Gap disc — fills with accent colour to cleanly mask the
+                //    envelope lines that run behind the magnifying glass ──────
+                let lcx = w * 0.607, lcy = h * 0.654
+                let lr  = w * 0.190, gap = w * 0.039
+                ctx.fill(Path(ellipseIn: CGRect(x: lcx - lr - gap, y: lcy - lr - gap,
+                                                width: (lr + gap) * 2,
+                                                height: (lr + gap) * 2)),
+                         with: .color(accentColor))
+
+                // ── Lens circle ─────────────────────────────────────────────
+                let lensRect = CGRect(x: lcx - lr, y: lcy - lr,
+                                      width: lr * 2, height: lr * 2)
+                ctx.fill(Path(ellipseIn: lensRect),   with: .color(accentColor))
+                ctx.stroke(Path(ellipseIn: lensRect), with: .color(.white), lineWidth: sw)
+
+                // ── Handle ──────────────────────────────────────────────────
+                let off = lr * 0.707
+                var handle = Path()
+                handle.move(to:    CGPoint(x: lcx + off + sw * 0.5, y: lcy + off + sw * 0.5))
+                handle.addLine(to: CGPoint(x: lcx + off + sw * 0.5 + w * 0.117,
+                                           y: lcy + off + sw * 0.5 + h * 0.117))
+                ctx.stroke(handle, with: .color(.white),
+                           style: StrokeStyle(lineWidth: sw + 2, lineCap: .round))
             }
-            .offset(x: size * 0.24, y: size * 0.18)
         }
         .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
     }
 }
 
@@ -7077,6 +7109,29 @@ struct SettingsView: View {
     private var aboutTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 16) {
+                    MsgVaultBrandMark(size: 72)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("MsgVault")
+                            .font(.title2.bold())
+                        Text("Fast Email Search for Mac")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Text("v0.2.0")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Built by Fueld AI")
                         .font(.headline)

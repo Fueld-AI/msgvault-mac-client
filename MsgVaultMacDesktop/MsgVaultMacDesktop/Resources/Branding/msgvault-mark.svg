@@ -1,13 +1,30 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MsgVault mark">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="currentColor" stop-opacity="1"/>
-      <stop offset="100%" stop-color="currentColor" stop-opacity="0.85"/>
-    </linearGradient>
-  </defs>
-  <rect x="88" y="88" width="848" height="848" rx="184" fill="url(#bg)"/>
-  <rect x="248" y="320" width="474" height="304" rx="36" fill="none" stroke="#ffffff" stroke-width="38" stroke-linejoin="round"/>
-  <path d="M258 344 L484 518 L710 344" fill="none" stroke="#ffffff" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="692" cy="642" r="100" fill="none" stroke="#ffffff" stroke-width="38"/>
-  <path d="M768 718 L850 800" fill="none" stroke="#ffffff" stroke-width="38" stroke-linecap="round"/>
+  <!--
+    MsgVault brand mark — v0.2.0
+    Use currentColor to tint the background to any theme accent colour.
+    All glyph strokes are white (#fff).
+  -->
+
+  <!-- Background rounded square -->
+  <rect x="0" y="0" width="1024" height="1024" rx="225" fill="currentColor"/>
+
+  <!-- Envelope body -->
+  <rect x="128" y="196" width="642" height="418" rx="44"
+        fill="none" stroke="#fff" stroke-width="54"/>
+
+  <!-- V-flap — starts half-stroke inside the top edge to avoid bleed -->
+  <polyline points="172,223 449,405 726,223"
+            fill="none" stroke="#fff" stroke-width="54"
+            stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Gap disc — same colour as background, masks envelope lines behind lens -->
+  <circle cx="622" cy="670" r="235" fill="currentColor"/>
+
+  <!-- Magnifying glass lens — filled + white outline -->
+  <circle cx="622" cy="670" r="195"
+          fill="currentColor" stroke="#fff" stroke-width="54"/>
+
+  <!-- Handle -->
+  <line x1="766" y1="814" x2="886" y2="934"
+        stroke="#fff" stroke-width="58" stroke-linecap="round"/>
 </svg>
