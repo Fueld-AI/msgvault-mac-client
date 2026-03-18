@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_PATH="$ROOT_DIR/MsgVaultMacDesktop/MsgVaultMacDesktop.xcodeproj"
 SCHEME="${SCHEME:-MsgVaultMacDesktop}"
+APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-MailTrawl}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 TEAM_ID="${TEAM_ID:-H5V83A3XV8}"
 EXPORT_METHOD="${EXPORT_METHOD:-developer-id}"
@@ -14,7 +15,7 @@ ARCHIVE_PATH="$BUILD_DIR/${SCHEME}.xcarchive"
 EXPORT_PATH="$BUILD_DIR/export"
 EXPORT_OPTIONS_PATH="$BUILD_DIR/exportOptions.plist"
 DMG_STAGE_PATH="$BUILD_DIR/dmg-root"
-DMG_PATH="$BUILD_DIR/${SCHEME}.dmg"
+DMG_PATH="$BUILD_DIR/${APP_DISPLAY_NAME}.dmg"
 
 NOTARIZE="${NOTARIZE:-1}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-AC_NOTARY}"
@@ -136,7 +137,7 @@ log "Creating DMG with installer window"
 #   App icon      x=165, y=185
 #   Applications  x=495, y=185
 create-dmg \
-  --volname "$SCHEME" \
+  --volname "$APP_DISPLAY_NAME" \
   --background "$BACKGROUND_IMG" \
   --window-pos 200 120 \
   --window-size 660 400 \
