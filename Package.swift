@@ -7,7 +7,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "MailTrawl",
-            path: "MsgVaultMacDesktop/MsgVaultMacDesktop",
+            path: "MailTrawl/MailTrawl",
             resources: [
                 .process("Assets.xcassets"),
                 .process("Resources")

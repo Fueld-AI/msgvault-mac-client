@@ -11,9 +11,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		B58C6BB42F5E165C00B64D8E /* MsgVaultMacDesktop */ = {
+		B58C6BB42F5E165C00B64D8E /* MailTrawl */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = MsgVaultMacDesktop;
+			path = MailTrawl;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +32,7 @@
 		B58C6BA92F5E165C00B64D8E = {
 			isa = PBXGroup;
 			children = (
-				B58C6BB42F5E165C00B64D8E /* MsgVaultMacDesktop */,
+				B58C6BB42F5E165C00B64D8E /* MailTrawl */,
 				B58C6BB32F5E165C00B64D8E /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,9 +48,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		B58C6BB12F5E165C00B64D8E /* MsgVaultMacDesktop */ = {
+		B58C6BB12F5E165C00B64D8E /* MailTrawl */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = B58C6BBD2F5E165D00B64D8E /* Build configuration list for PBXNativeTarget "MsgVaultMacDesktop" */;
+			buildConfigurationList = B58C6BBD2F5E165D00B64D8E /* Build configuration list for PBXNativeTarget "MailTrawl" */;
 			buildPhases = (
 				B58C6BAE2F5E165C00B64D8E /* Sources */,
 				B58C6BAF2F5E165C00B64D8E /* Frameworks */,
@@ -61,12 +61,12 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				B58C6BB42F5E165C00B64D8E /* MsgVaultMacDesktop */,
+				B58C6BB42F5E165C00B64D8E /* MailTrawl */,
 			);
-			name = MsgVaultMacDesktop;
+			name = MailTrawl;
 			packageProductDependencies = (
 			);
-			productName = MsgVaultMacDesktop;
+			productName = MailTrawl;
 			productReference = B58C6BB22F5E165C00B64D8E /* MailTrawl.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -85,7 +85,7 @@
 					};
 				};
 			};
-			buildConfigurationList = B58C6BAD2F5E165C00B64D8E /* Build configuration list for PBXProject "MsgVaultMacDesktop" */;
+			buildConfigurationList = B58C6BAD2F5E165C00B64D8E /* Build configuration list for PBXProject "MailTrawl" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -99,7 +99,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				B58C6BB12F5E165C00B64D8E /* MsgVaultMacDesktop */,
+				B58C6BB12F5E165C00B64D8E /* MailTrawl */,
 			);
 		};
 /* End PBXProject section */
@@ -312,7 +312,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		B58C6BAD2F5E165C00B64D8E /* Build configuration list for PBXProject "MsgVaultMacDesktop" */ = {
+		B58C6BAD2F5E165C00B64D8E /* Build configuration list for PBXProject "MailTrawl" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				B58C6BBB2F5E165D00B64D8E /* Debug */,
@@ -321,7 +321,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		B58C6BBD2F5E165D00B64D8E /* Build configuration list for PBXNativeTarget "MsgVaultMacDesktop" */ = {
+		B58C6BBD2F5E165D00B64D8E /* Build configuration list for PBXNativeTarget "MailTrawl" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				B58C6BBE2F5E165D00B64D8E /* Debug */,

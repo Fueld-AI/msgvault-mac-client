@@ -17,8 +17,8 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "B58C6BB12F5E165C00B64D8E"
                BuildableName = "MailTrawl.app"
-               BlueprintName = "MsgVaultMacDesktop"
-               ReferencedContainer = "container:MsgVaultMacDesktop.xcodeproj">
+               BlueprintName = "MailTrawl"
+               ReferencedContainer = "container:MailTrawl.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -46,8 +46,8 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "B58C6BB12F5E165C00B64D8E"
             BuildableName = "MailTrawl.app"
-            BlueprintName = "MsgVaultMacDesktop"
-            ReferencedContainer = "container:MsgVaultMacDesktop.xcodeproj">
+            BlueprintName = "MailTrawl"
+            ReferencedContainer = "container:MailTrawl.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -63,8 +63,8 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "B58C6BB12F5E165C00B64D8E"
             BuildableName = "MailTrawl.app"
-            BlueprintName = "MsgVaultMacDesktop"
-            ReferencedContainer = "container:MsgVaultMacDesktop.xcodeproj">
+            BlueprintName = "MailTrawl"
+            ReferencedContainer = "container:MailTrawl.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

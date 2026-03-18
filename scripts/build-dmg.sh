@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_PATH="$ROOT_DIR/MsgVaultMacDesktop/MsgVaultMacDesktop.xcodeproj"
-SCHEME="${SCHEME:-MsgVaultMacDesktop}"
+PROJECT_PATH="$ROOT_DIR/MailTrawl/MailTrawl.xcodeproj"
+SCHEME="${SCHEME:-MailTrawl}"
 APP_DISPLAY_NAME="${APP_DISPLAY_NAME:-MailTrawl}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 TEAM_ID="${TEAM_ID:-H5V83A3XV8}"
@@ -92,7 +92,7 @@ APP_NAME="$(basename "$APP_PATH")"
 # ── Inject a complete AppIcon.icns built via iconutil ─────────────────────
 # actool sometimes rejects large PNG sizes; iconutil is always reliable.
 log "Building full AppIcon.icns via iconutil and injecting into app bundle"
-ICON_SRC="$ROOT_DIR/MsgVaultMacDesktop/MsgVaultMacDesktop/Assets.xcassets/AppIcon.appiconset"
+ICON_SRC="$ROOT_DIR/MailTrawl/MailTrawl/Assets.xcassets/AppIcon.appiconset"
 ICONSET_TMP="$BUILD_DIR/AppIcon.iconset"
 ICNS_TMP="$BUILD_DIR/AppIcon.icns"
 rm -rf "$ICONSET_TMP" && mkdir -p "$ICONSET_TMP"

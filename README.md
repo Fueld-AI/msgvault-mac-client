@@ -64,42 +64,38 @@ Whether you have 10,000 emails or 10 million, MailTrawl handles them all with sp
 
 ## Requirements
 
-| Requirement | Minimum |
+| Requirement | Detail |
 |---|---|
 | macOS | 14 (Sonoma) or later |
-| Xcode | 15+ (to build from source) |
-| msgvault CLI | Installed and configured |
+| Xcode | 15+ (to build from source only) |
+| msgvault CLI | Installed via Setup Wizard or manually |
 
 ---
 
 ## Installation
 
-### Step 1 — Install msgvault
+### Option A — Download the DMG (recommended)
 
-Visit [msgvault.io](https://www.msgvault.io) for the full setup guide, or install directly:
+Download the latest release from the [GitHub Releases](https://github.com/Fueld-AI/mailtrawl/releases) page, open the `.dmg`, and drag **MailTrawl** to your Applications folder.
 
+The built-in Setup Wizard will guide you through installing the `msgvault` CLI, configuring OAuth credentials, and running your first sync — all in one flow.
+
+### Option B — Build from source
+
+**1. Open in Xcode**
 ```bash
-curl -fsSL https://msgvault.io/install.sh | bash
-```
-
-Then [set up OAuth credentials](https://www.msgvault.io/guides/oauth-setup/) and sync your Gmail:
-
-```bash
-msgvault --local sync-full your@email.com
-```
-
-### Step 2 — Run MailTrawl
-
-**Option A: Open in Xcode**
-```bash
-open MsgVaultMacDesktop/MsgVaultMacDesktop.xcodeproj
+open MailTrawl/MailTrawl.xcodeproj
 ```
 Select **My Mac** as the target, then press **⌘R**.
 
-**Option B: Build from terminal**
+**2. Or build from terminal**
 ```bash
-cd MsgVaultMacDesktop
-xcodebuild -scheme MsgVaultMacDesktop -configuration Release
+xcodebuild -project MailTrawl/MailTrawl.xcodeproj -scheme MailTrawl -configuration Release
+```
+
+You'll still need the `msgvault` CLI installed separately:
+```bash
+curl -fsSL https://msgvault.io/install.sh | bash
 ```
 
 ---
@@ -138,7 +134,7 @@ All inference runs on-device. No API keys. No usage fees. No data leaving your M
 
 | Resource | URL |
 |---|---|
-| MailTrawl | [GitHub](https://github.com) |
+| MailTrawl | [GitHub](https://github.com/Fueld-AI/mailtrawl) |
 | msgvault CLI Docs | [msgvault.io](https://www.msgvault.io) |
 | msgvault Setup Guide | [msgvault.io/setup](https://www.msgvault.io/setup/) |
 | msgvault OAuth Guide | [msgvault.io/guides/oauth-setup](https://www.msgvault.io/guides/oauth-setup/) |
