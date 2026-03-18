@@ -1032,7 +1032,7 @@ struct SetupWizardView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Step 1 - Install msgvault CLI")
                 .font(.title3.bold())
-            Text("MsgVault needs the local msgvault CLI to authenticate, sync, and search your archive.")
+            Text("MailTrawl needs the local msgvault CLI to authenticate, sync, and search your archive.")
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {

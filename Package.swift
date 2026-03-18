@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "MsgVaultUI",
+    name: "MailTrawl",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "MsgVaultUI",
+            name: "MailTrawl",
             path: "MsgVaultMacDesktop/MsgVaultMacDesktop",
             resources: [
                 .process("Assets.xcassets"),

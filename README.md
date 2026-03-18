@@ -1,16 +1,15 @@
 <div align="center">
 
-<img src="docs/banner.png" alt="MsgVault_Mac — Fast Email Search for Mac" width="100%" />
+<img src="docs/banner.png" alt="MailTrawl — Fast Email Search for Mac" width="100%" />
 
 <br /><br />
 
-# MsgVault_Mac for macOS
+# MailTrawl for macOS
 
 **A beautiful, native macOS app for searching, browsing, and understanding your entire email archive — entirely offline.**
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-30B0C7?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![Built with SwiftUI](https://img.shields.io/badge/SwiftUI-Native-30B0C7?style=for-the-badge&logo=swift&logoColor=white)](https://developer.apple.com/xcode/swiftui/)
-[![Website](https://img.shields.io/badge/Website-msgvault.fueld.ai-30B0C7?style=for-the-badge&logo=safari&logoColor=white)](https://msgvault.fueld.ai)
 [![msgvault CLI](https://img.shields.io/badge/msgvault%20CLI-msgvault.io-30B0C7?style=for-the-badge&logoColor=white)](https://www.msgvault.io)
 [![Made by Fueld](https://img.shields.io/badge/Made%20by-Fueld.ai-30B0C7?style=for-the-badge&logoColor=white)](https://fueld.ai)
 
@@ -18,15 +17,13 @@
 
 ---
 
-## What is MsgVault_Mac?
+## What is MailTrawl?
 
-**[Visit the MsgVault_Mac website →](https://msgvault.fueld.ai)**
+MailTrawl is a native macOS desktop application built by the team at [Fueld.ai](https://fueld.ai), wrapping the powerful [`msgvault`](https://www.msgvault.io) CLI to give you a polished, fast, and fully offline interface to explore your entire Gmail archive. Every search, every filter, every AI query — runs entirely on your machine. No cloud. No subscriptions. Your data stays yours.
 
-MsgVault_Mac is a native macOS desktop application built by the team at [Fueld.ai](https://fueld.ai), wrapping the powerful [`msgvault`](https://www.msgvault.io) CLI to give you a polished, fast, and fully offline interface to explore your entire Gmail archive. Every search, every filter, every AI query — runs entirely on your machine. No cloud. No subscriptions. Your data stays yours.
+Whether you have 10,000 emails or 10 million, MailTrawl handles them all with speed and elegance.
 
-Whether you have 10,000 emails or 10 million, MsgVault_Mac handles them all with speed and elegance.
-
-> **msgvault CLI** — the open-source engine powering MsgVault_Mac. [Read the full documentation at msgvault.io →](https://www.msgvault.io)
+> **msgvault CLI** — the open-source engine powering MailTrawl. [Read the full documentation at msgvault.io →](https://www.msgvault.io)
 
 ---
 
@@ -91,7 +88,7 @@ Then [set up OAuth credentials](https://www.msgvault.io/guides/oauth-setup/) and
 msgvault --local sync-full your@email.com
 ```
 
-### Step 2 — Run MsgVault_Mac
+### Step 2 — Run MailTrawl
 
 **Option A: Open in Xcode**
 ```bash
@@ -109,7 +106,7 @@ xcodebuild -scheme MsgVaultMacDesktop -configuration Release
 
 ## Architecture
 
-MsgVault_Mac is intentionally lean — it shells out to the `msgvault` CLI rather than bundling any library, which means:
+MailTrawl is intentionally lean — it shells out to the `msgvault` CLI rather than bundling any library, which means:
 
 - **No additional dependencies** — one binary, nothing else
 - **Works with any msgvault version** — CLI upgrades automatically apply
@@ -122,7 +119,7 @@ The app auto-detects `msgvault` at all common install locations (`/usr/local/bin
 
 ## Local AI Setup
 
-MsgVault_Mac can connect to a locally running [Ollama](https://ollama.ai) instance to power AI-assisted search and summarisation. Go to **Settings → AI Setup** to choose your model:
+MailTrawl can connect to a locally running [Ollama](https://ollama.ai) instance to power AI-assisted search and summarisation. Go to **Settings → AI Setup** to choose your model:
 
 | Model | Size | Best For |
 |---|---|---|
@@ -141,7 +138,7 @@ All inference runs on-device. No API keys. No usage fees. No data leaving your M
 
 | Resource | URL |
 |---|---|
-| MsgVault_Mac Website | [msgvault.fueld.ai](https://msgvault.fueld.ai) |
+| MailTrawl | [GitHub](https://github.com) |
 | msgvault CLI Docs | [msgvault.io](https://www.msgvault.io) |
 | msgvault Setup Guide | [msgvault.io/setup](https://www.msgvault.io/setup/) |
 | msgvault OAuth Guide | [msgvault.io/guides/oauth-setup](https://www.msgvault.io/guides/oauth-setup/) |

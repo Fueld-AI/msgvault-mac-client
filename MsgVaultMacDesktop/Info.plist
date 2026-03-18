@@ -23,8 +23,8 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>MsgVault uses the microphone for optional voice-to-search input.</string>
+	<string>MailTrawl uses the microphone for optional voice-to-search input.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>MsgVault uses speech recognition to convert spoken search requests into text.</string>
+	<string>MailTrawl uses speech recognition to convert spoken search requests into text.</string>
 </dict>
 </plist>

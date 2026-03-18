@@ -138,7 +138,7 @@ struct ContentView: View {
                     HStack(spacing: 8) {
                         MsgVaultBrandMark(size: sidebarCollapsed ? 30 : 34)
                         if !sidebarCollapsed {
-                            Text("MsgVault")
+                            Text("MailTrawl")
                                 .font(.title3.bold())
                                 .foregroundStyle(.primary)
                         }
@@ -543,7 +543,7 @@ struct SearchView: View {
         
         var label: String {
             switch self {
-            case .defaultOrder: return "Default (MsgVault)"
+            case .defaultOrder: return "Default (msgvault)"
             case .dateNewest:   return "Date: Newest first"
             case .dateOldest:   return "Date: Oldest first"
             case .senderAZ:     return "Sender: A to Z"
@@ -7112,7 +7112,7 @@ struct SettingsView: View {
                 HStack(spacing: 16) {
                     MsgVaultBrandMark(size: 72)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("MsgVault")
+                        Text("MailTrawl")
                             .font(.title2.bold())
                         Text("Fast Email Search for Mac")
                             .font(.subheadline)
@@ -7135,7 +7135,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Built by Fueld AI")
                         .font(.headline)
-                    Text("MsgVault has been built by the team at Fueld AI.")
+                    Text("MailTrawl has been built by the team at Fueld AI.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 

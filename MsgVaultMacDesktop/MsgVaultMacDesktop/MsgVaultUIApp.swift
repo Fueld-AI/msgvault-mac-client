@@ -15,7 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct MsgVaultUIApp: App {
+struct MailTrawlApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = EmailStore()
     @AppStorage("appTheme") private var appThemeRawValue = AppTheme.teal.rawValue

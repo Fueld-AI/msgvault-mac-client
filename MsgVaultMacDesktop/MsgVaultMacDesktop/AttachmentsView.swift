@@ -1838,8 +1838,12 @@ struct AttachmentsView: View {
                 Divider()
 
                 DisclosureGroup(isExpanded: $showSourceEmail) {
-                    MessageDetailView()
-                        .frame(minHeight: 220, maxHeight: 360)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        MessageDetailView()
+                            .frame(maxWidth: .infinity)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 420)
                 } label: {
                     HStack {
                         Text("Source Email")

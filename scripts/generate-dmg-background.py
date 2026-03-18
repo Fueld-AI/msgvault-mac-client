@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generates the DMG installer background image for MsgVaultMacDesktop.
+Generates the DMG installer background image for MailTrawl.
 Output: scripts/dmg-background.png  (660 x 400 px, @1x; also writes @2x at 1320x800)
 
 Layout (icon centres used by create-dmg):
@@ -13,7 +13,7 @@ import os
 import sys
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 except ImportError:
     sys.exit("Pillow is required. Run:  pip3 install pillow")
 
@@ -24,15 +24,11 @@ W, H = 660, 400
 SCALE = 2          # produce @2x for Retina; create-dmg handles both
 
 # ---------------------------------------------------------------------------
-# Palette  (teal brand theme)
+# Palette  (light, clean — forces Finder to render labels as dark, crisp text)
 # ---------------------------------------------------------------------------
-BG_TOP    = (18, 22, 36)       # deep navy-black
-BG_BOT    = (12, 16, 28)       # slightly darker at bottom
+BG_TOP    = (245, 247, 250)    # near-white cool light
+BG_BOT    = (235, 238, 243)    # very subtle grey at bottom
 TEAL      = (48, 176, 199)     # SwiftUI .teal (approx)
-TEAL_DIM  = (32, 120, 138)
-WHITE     = (255, 255, 255)
-GREY_LT   = (180, 190, 205)
-GREY_DK   = (80, 95, 115)
 ARROW_CLR = (48, 176, 199)
 
 
@@ -82,14 +78,18 @@ def build_image(w, h):
         t = y / (h - 1)
         draw.line([(0, y), (w, y)], fill=lerp_color(BG_TOP, BG_BOT, t))
 
-    # --- Subtle teal glow in the top-centre ---
-    glow_w, glow_h = int(w * 0.55), int(h * 0.45)
+    # --- Teal accent bar at top ---
+    bar_h = max(3, int(4 * (w / W)))
+    draw.rectangle([0, 0, w, bar_h], fill=TEAL)
+
+    # --- Subtle teal wash radiating from top-centre ---
+    glow_w, glow_h = int(w * 0.6), int(h * 0.5)
     glow_cx, glow_cy = w // 2, 0
     glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     gdraw = ImageDraw.Draw(glow)
     steps = 30
     for i in range(steps, 0, -1):
-        alpha = int(28 * (i / steps) ** 2)
+        alpha = int(18 * (i / steps) ** 2)
         scale_f = i / steps
         rw = int(glow_w * scale_f)
         rh = int(glow_h * scale_f)
@@ -99,68 +99,14 @@ def build_image(w, h):
         ], fill=(*TEAL, alpha))
     img.paste(glow, (0, 0), glow)
 
-    # --- Thin teal accent line at top ---
-    bar_h = max(2, int(3 * (w / W)))
-    draw.rectangle([0, 0, w, bar_h], fill=TEAL)
-
     # --- App label (left icon zone) ---
     icon_cx, icon_cy = int(165 * w / W), int(185 * h / H)
     apps_cx = int(495 * w / W)
-
-    # Icon placeholder ring (the actual icon is overlaid by create-dmg)
-    ring_r = int(62 * w / W)
-    draw.ellipse([
-        icon_cx - ring_r, icon_cy - ring_r,
-        icon_cx + ring_r, icon_cy + ring_r,
-    ], outline=(*TEAL_DIM, 180), width=max(1, int(1.5 * w / W)))
 
     # --- Arrow ---
     arrow_cx = (icon_cx + apps_cx) // 2
     arrow_cy = icon_cy
     draw_arrow(draw, arrow_cx, arrow_cy, w / W)
-
-    # --- Applications placeholder ring ---
-    draw.ellipse([
-        apps_cx - ring_r, icon_cy - ring_r,
-        apps_cx + ring_r, icon_cy + ring_r,
-    ], outline=(*TEAL_DIM, 180), width=max(1, int(1.5 * w / W)))
-
-    # --- Text labels ---
-    # Try to load a system font; fall back to default
-    font_lg = font_sm = None
-    candidates = [
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/Arial.ttf",
-        "/Library/Fonts/Arial.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                font_lg = ImageFont.truetype(path, int(15 * w / W))
-                font_sm = ImageFont.truetype(path, int(12 * w / W))
-                break
-            except Exception:
-                continue
-
-    def centred_text(text, cx, cy, font, color, offset_y=0):
-        if font:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            tw = bbox[2] - bbox[0]
-            draw.text((cx - tw // 2, cy + offset_y), text, font=font, fill=color)
-        else:
-            draw.text((cx, cy + offset_y), text, fill=color)
-
-    label_y = icon_cy + ring_r + int(10 * h / H)
-    centred_text("MsgVaultMacDesktop", icon_cx, label_y, font_lg, GREY_LT)
-    centred_text("Applications", apps_cx, label_y, font_lg, GREY_LT)
-
-    # --- Bottom hint ---
-    hint_y = h - int(28 * h / H)
-    centred_text(
-        "Drag MsgVaultMacDesktop to the Applications folder to install",
-        w // 2, hint_y, font_sm, GREY_DK,
-    )
 
     return img
 
